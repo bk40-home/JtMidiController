@@ -125,9 +125,10 @@ private:
     static constexpr uint8_t  PTS_PER_SEG  = 16;
 
     // ── M5 Angle8 pot direction ─────────────────────────────────────────────
-    // Physical pots are inverted: clockwise (up) = lower ADC/CC value.
-    // When true, display inverts so pot-up = wider segment / higher level.
-    static constexpr bool INVERT_POT = true;
+    // adcToCC() already inverts so clockwise = higher CC.
+    // Set false to avoid double-inversion.  Only set true if adcToCC is
+    // changed to a non-inverting formula.
+    static constexpr bool INVERT_POT = false;
 
     // ── Colour theme (RGB565) ───────────────────────────────────────────────
     static constexpr uint16_t COL_BG       = 0x1082;  // dark navy
@@ -161,6 +162,12 @@ private:
     void drawEnvelopePage(const PageManager& pages);
     void refreshEnvelopePage(const PageManager& pages);
     void drawEnvelopeCurve(const EnvParams& env, uint16_t accentColour);
+
+    // ── SEQ page rendering ──────────────────────────────────────────────────
+    void drawSequencerPage(const PageManager& pages);
+    void refreshSequencerPage(const PageManager& pages);
+    void drawSequencerBar(uint8_t idx, uint8_t value, uint16_t accent,
+                          uint8_t stepNum);
 
     // TCA9554 display reset sequence
     void resetDisplay();

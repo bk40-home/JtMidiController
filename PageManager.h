@@ -60,6 +60,9 @@ public:
     // Get the local CC cache value
     uint8_t getCCValue(uint8_t cc) const;
 
+    // Get a step sequencer value (0–15). Returns cached value for display.
+    uint8_t getStepValue(uint8_t step) const;
+
     // ── Pickup state access (for display) ───────────────────────────────────
     const PickupMode& pickup() const { return pickup_; }
 
@@ -75,6 +78,11 @@ private:
 
     // Local CC cache — mirrors Teensy parameter state
     uint8_t ccState_[Config::CC_STATE_SIZE] = {};
+
+    // Step sequencer value cache — 16 steps, populated by pot edits
+    // and incoming Teensy CCs (SEQ_STEP_SELECT + SEQ_STEP_VALUE pairs)
+    uint8_t stepValues_[16] = {};
+    uint8_t lastStepSelect_  = 0;  // tracks the most recent step select CC
 
     // Pickup mode for pots
     PickupMode pickup_;

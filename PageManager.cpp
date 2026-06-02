@@ -44,11 +44,22 @@ uint8_t PageManager::getCCValue(uint8_t cc) const {
     return (cc < Config::CC_STATE_SIZE) ? ccState_[cc] : 0;
 }
 
+uint8_t PageManager::getStepValue(uint8_t step) const {
+    return (step < 16) ? stepValues_[step] : 0;
+}
+
 // ── Incoming CC from Teensy ─────────────────────────────────────────────────
 
 void PageManager::onReceiveCC(uint8_t cc, uint8_t value) {
     if (cc >= Config::CC_STATE_SIZE) return;
     ccState_[cc] = value;
+
+    // Track step sequencer values from Teensy (select + value pairs)
+    if (cc == CC::SEQ_STEP_SELECT) {
+        lastStepSelect_ = value;
+    } else if (cc == CC::SEQ_STEP_VALUE && lastStepSelect_ < 16) {
+        stepValues_[lastStepSelect_] = value;
+    }
 
     // Update pickup target if this CC is on the current pot mapping
     const auto& map = activeMapping();
@@ -275,9 +286,12 @@ void PageManager::refreshPickupTargets() {
 
 void PageManager::handleStepPot(uint8_t potIdx, uint8_t value) {
     // Step sequencer addressing: pot position (0..7) + scene state
-    // Scene A = steps 1..8, Scene B = steps 9..16
+    // Scene A = steps 0..7, Scene B = steps 8..15
     const uint8_t stepOffset = (potScene_ == Scene::B) ? 8 : 0;
     const uint8_t stepIndex  = potIdx + stepOffset;
+
+    // Cache for display
+    if (stepIndex < 16) stepValues_[stepIndex] = value;
 
     // Send step select first, then step value (Teensy expects this pair)
     emitCC(CC::SEQ_STEP_SELECT, stepIndex);

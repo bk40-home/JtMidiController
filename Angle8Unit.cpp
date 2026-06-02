@@ -63,11 +63,17 @@ uint16_t Angle8Unit::rawPot(uint8_t i) const {
 }
 
 uint8_t Angle8Unit::adcToCC(int value) {
-    // M5 8-Angle reads HIGH at counterclockwise, LOW at clockwise.
-    // Invert so clockwise = increasing CC value (0..127).
-    if (value <= 0)    return 127;
-    if (value >= (int)kPotMax) return 0;
-    return 127 - (uint8_t)((uint32_t)value * 127 / kPotMax);
+    // M5 Angle8 reads HIGH at counterclockwise, LOW at clockwise.
+    // Invert so clockwise (physical "up") = higher CC value.
+    //
+    // Dead zones (~0.8%) at each end of the ADC range ensure physical
+    // pots reliably reach CC 0 and CC 127.  Without these, the last
+    // ADC step before the endpoint truncates to CC 1 / CC 126.
+    static constexpr int DZ = 32;
+    const int clamped  = constrain(value, DZ, (int)kPotMax - DZ);
+    const int range    = (int)kPotMax - 2 * DZ;
+    const uint8_t cc   = (uint8_t)((uint32_t)(clamped - DZ) * 127 / range);
+    return 127 - cc;   // invert: low ADC (CW) → high CC
 }
 
 // ── LED control ─────────────────────────────────────────────────────────────

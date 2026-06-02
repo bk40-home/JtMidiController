@@ -20,6 +20,14 @@ bool ByteButtonUnit::begin(TwoWire* wire, uint8_t sda, uint8_t scl,
         dev_.setLEDBrightness(i, kLedBrightness);
     }
     setAllLeds(0);  // start dark
+
+    // Read initial button state so the first poll() doesn't see false
+    // rising edges.  Without this, any button that reads as "on" during
+    // boot (e.g. momentary contact bounce) triggers an unwanted page jump.
+    for (uint8_t i = 0; i < kNumButtons; ++i) {
+        btnPrev_[i] = (dev_.getSwitchStatus(i) != 0);
+    }
+
     return true;
 }
 

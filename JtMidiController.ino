@@ -48,15 +48,9 @@
 // MIDI
 #include "UartMidi.h"
 
-// USB MIDI — requires Arduino IDE: Tools → USB Mode → "USB-OTG (TinyUSB)"
-// CDC serial still works alongside MIDI as a composite USB device.
-#if __has_include("USB.h") && __has_include("USBMIDI.h")
-    #include "USB.h"
-    #include "USBMIDI.h"
-    #define JT_HAS_USB_MIDI 1
-#else
-    #define JT_HAS_USB_MIDI 0
-#endif
+#include <Adafruit_TinyUSB.h>
+#include <MIDI.h>
+#define JT_HAS_USB_MIDI 1
 
 // UI
 #include "PageManager.h"
@@ -72,9 +66,10 @@ static Angle8Unit      angle;
 static Encoder8Unit    encoder;
 static ByteButtonUnit  buttons;
 static UartMidi        uartMidi;
-#if JT_HAS_USB_MIDI
-static USBMIDI         usbMidiDev("JT-8000 Controller");
-#endif
+static Adafruit_USBD_MIDI usbMidiTransport;
+
+MIDI_CREATE_INSTANCE(Adafruit_USBD_MIDI, usbMidiTransport, USBMIDI);
+
 static PageManager     pages;
 static LedManager      leds;
 static DisplayRenderer display;
@@ -95,9 +90,7 @@ static Scene    prevPotScene = Scene::A;
 // PageManager sends CCs through this callback → UART + USB MIDI
 static void onSendCC(uint8_t cc, uint8_t value) {
     uartMidi.sendCC(cc, value);
-    #if JT_HAS_USB_MIDI
-    usbMidiDev.controlChange(cc, value, Config::MIDI_CHANNEL);
-    #endif
+    USBMIDI.sendControlChange(cc, value, Config::MIDI_CHANNEL);
 }
 
 // Incoming CCs from Teensy → update PageManager's local CC cache
@@ -111,9 +104,12 @@ static void onReceiveCC(uint8_t channel, uint8_t cc, uint8_t value) {
 // ═════════════════════════════════════════════════════════════════════════════
 
 void setup() {
-    // ── 1. Debug console ────────────────────────────────────────────────
+    // USB MIDI must register BEFORE the USB stack starts
+    usbMidiTransport.setStringDescriptor("JT-8000 Controller");
+    USBMIDI.begin(MIDI_CHANNEL_OMNI);
+
     Serial.begin(115200);
-    delay(500);
+    delay(1000);  // host needs time to enumerate
 
     // Suppress ESP-IDF I2C master NACK log spam. The M5 unit libraries do
     // speculative reads that NACK harmlessly — the working demo has this
@@ -187,12 +183,7 @@ void setup() {
                   Config::UART_TX_PIN, Config::UART_RX_PIN, Config::UART_BAUD);
     #endif
 
-    // ── 5b. USB MIDI ────────────────────────────────────────────────────
-    #if JT_HAS_USB_MIDI
-    usbMidiDev.begin();
-    USB.begin();
-    Serial.println("[USB-MIDI] Enabled — device: JT-8000 Controller");
-    #endif
+    Serial.println("[USB-MIDI] Adafruit TinyUSB active");
 
     // ── 6. Patch store ──────────────────────────────────────────────────
     patchStore.begin();
@@ -236,23 +227,15 @@ void loop() {
     uartMidi.poll();
     #endif
 
-    // Poll USB MIDI for incoming CCs from host (updates display/cache)
-    #if JT_HAS_USB_MIDI
-    {
-        midiEventPacket_t pkt;
-        while (usbMidiDev.readPacket(&pkt)) {
-            uint8_t cin = pkt.header & 0x0F;
-            if (cin == 0x0B) {  // Control Change
-                uint8_t ch  = (pkt.byte1 & 0x0F) + 1;
-                uint8_t cc  = pkt.byte2;
-                uint8_t val = pkt.byte3;
+    if (USBMIDI.read()) {
+            if (USBMIDI.getType() == midi::ControlChange) {
+                uint8_t cc  = USBMIDI.getData1();
+                uint8_t val = USBMIDI.getData2();
+                uint8_t ch  = USBMIDI.getChannel();
                 pages.onReceiveCC(cc, val);
-                // Also forward to Teensy via UART
                 uartMidi.sendCC(cc, val, ch);
             }
         }
-    }
-    #endif
 
     // ── 3. Update PageManager (every loop) ──────────────────────────────
     pages.update(angle, encoder, buttons);

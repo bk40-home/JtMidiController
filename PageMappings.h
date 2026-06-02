@@ -134,20 +134,20 @@ static const PageMapping kMixMapping = {
 // =============================================================================
 static const PageMapping kFltMapping = {
     "FILTER", "FLT", PageColour::PC_ORANGE,
-    // potsA
-    { S("CUTOFF",    CC::FILTER_CUTOFF,    CONT),
-      S("RESONANCE", CC::FILTER_RESONANCE, CONT),
-      N, N, N, N, N, N },
+    // potsA — continuous + bipolar controls on pots for direct access
+    { S("CUTOFF",     CC::FILTER_CUTOFF,     CONT),
+      S("RESONANCE",  CC::FILTER_RESONANCE,  CONT),
+      S("ENV AMT",    CC::FILTER_ENV_AMOUNT,  BIPOLAR),
+      S("KEY TRACK",  CC::FILTER_KEY_TRACK,   BIPOLAR),
+      N, N, N, N },
     // potsB — empty
     { N, N, N, N, N, N, N, N },
-    // encsA
+    // encsA — selection-type params stay on encoders
     { S("ENGINE",    CC::FILTER_ENGINE,           SELECT),
       S("MODE",      CC::FILTER_MODE,             SELECT),
       S("VA TYPE",   CC::VA_FILTER_TYPE,          SELECT),
       S("XPANDER",   CC::FILTER_OBXA_XPANDER_MODE, SELECT),
-      S("ENV AMT",   CC::FILTER_ENV_AMOUNT,       BIPOLAR),
-      S("KEY TRACK", CC::FILTER_KEY_TRACK,        BIPOLAR),
-      N, N },
+      N, N, N, N },
     // encsB — empty
     { N, N, N, N, N, N, N, N }
 };
@@ -159,22 +159,22 @@ static const PageMapping kFltMapping = {
 // Sub 0: AMP envelope
 static const PageMapping kEnvAmpMapping = {
     "AMP", "AMP", PageColour::PC_RED,
-    // potsA — ADSR
+    // potsA — ADSR (0–3) + curve controls (4–6)
     { S("ATTACK",  CC::AMP_ATTACK,  ENV),
       S("DECAY",   CC::AMP_DECAY,   ENV),
       S("SUSTAIN", CC::AMP_SUSTAIN,  ENV),
       S("RELEASE", CC::AMP_RELEASE,  ENV),
-      N, N, N, N },
-    // potsB — empty
-    { N, N, N, N, N, N, N, N },
-    // encsA — sub-page selectors + curve controls
-    { S("AMP",     0, SUB_SEL),   // active sub-page indicator
-      S("FILT",    0, SUB_SEL),
-      S("PITCH",   0, SUB_SEL),
       S("ATK CRV", CC::AMP_ATTACK_CURVE,  CONT),
       S("DEC CRV", CC::AMP_DECAY_CURVE,   CONT),
       S("REL CRV", CC::AMP_RELEASE_CURVE, CONT),
-      N, N },
+      N },
+    // potsB — empty
+    { N, N, N, N, N, N, N, N },
+    // encsA — sub-page selectors only (curves moved to pots)
+    { S("AMP",     0, SUB_SEL),
+      S("FILT",    0, SUB_SEL),
+      S("PITCH",   0, SUB_SEL),
+      N, N, N, N, N },
     // encsB — empty
     { N, N, N, N, N, N, N, N }
 };
@@ -182,42 +182,44 @@ static const PageMapping kEnvAmpMapping = {
 // Sub 1: FILTER envelope
 static const PageMapping kEnvFilterMapping = {
     "FILTER", "FILT", PageColour::PC_GOLD,
+    // potsA — ADSR (0–3) + curve controls (4–6)
     { S("ATTACK",  CC::FILTER_ENV_ATTACK,  ENV),
       S("DECAY",   CC::FILTER_ENV_DECAY,   ENV),
       S("SUSTAIN", CC::FILTER_ENV_SUSTAIN,  ENV),
       S("RELEASE", CC::FILTER_ENV_RELEASE,  ENV),
-      N, N, N, N },
-    { N, N, N, N, N, N, N, N },
-    { S("AMP",     0, SUB_SEL),
-      S("FILT",    0, SUB_SEL),
-      S("PITCH",   0, SUB_SEL),
       S("ATK CRV", CC::FILTER_ATTACK_CURVE,  CONT),
       S("DEC CRV", CC::FILTER_DECAY_CURVE,   CONT),
       S("REL CRV", CC::FILTER_RELEASE_CURVE, CONT),
-      N, N },
+      N },
+    // potsB — empty
+    { N, N, N, N, N, N, N, N },
+    // encsA — sub-page selectors only (curves moved to pots)
+    { S("AMP",     0, SUB_SEL),
+      S("FILT",    0, SUB_SEL),
+      S("PITCH",   0, SUB_SEL),
+      N, N, N, N, N },
     { N, N, N, N, N, N, N, N }
 };
 
 // Sub 2: PITCH envelope (CCs 65–69 defined in ParamDefs.h)
 static const PageMapping kEnvPitchMapping = {
     "PITCH", "PITCH", PageColour::PC_MAGENTA,
-    // potsA — ADSR
+    // potsA — ADSR (0–3) + depth (4) + curves (5–7)
     { S("ATTACK",  CC::PITCH_ENV_ATTACK,   ENV),
       S("DECAY",   CC::PITCH_ENV_DECAY,    ENV),
       S("SUSTAIN", CC::PITCH_ENV_SUSTAIN,  ENV),
       S("RELEASE", CC::PITCH_ENV_RELEASE,  ENV),
-      N, N, N, N },
-    // potsB — empty
-    { N, N, N, N, N, N, N, N },
-    // encsA — sub-page selectors + depth + curve controls
-    { S("AMP",     0, SUB_SEL),
-      S("FILT",    0, SUB_SEL),
-      S("PITCH",   0, SUB_SEL),
       S("DEPTH",   CC::PITCH_ENV_DEPTH,       BIPOLAR),
       S("ATK CRV", CC::PITCH_ATTACK_CURVE,   CONT),
       S("DEC CRV", CC::PITCH_DECAY_CURVE,    CONT),
-      S("REL CRV", CC::PITCH_RELEASE_CURVE,  CONT),
-      N },
+      S("REL CRV", CC::PITCH_RELEASE_CURVE,  CONT) },
+    // potsB — empty
+    { N, N, N, N, N, N, N, N },
+    // encsA — sub-page selectors only (depth + curves moved to pots)
+    { S("AMP",     0, SUB_SEL),
+      S("FILT",    0, SUB_SEL),
+      S("PITCH",   0, SUB_SEL),
+      N, N, N, N, N },
     // encsB — empty
     { N, N, N, N, N, N, N, N }
 };

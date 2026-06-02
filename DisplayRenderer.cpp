@@ -76,6 +76,12 @@ void DisplayRenderer::drawPage(const PageManager& pages) {
         return;
     }
 
+    // SEQ pages get the step sequencer bar visualisation
+    if (pages.currentPage() == PageID::SEQ) {
+        drawSequencerPage(pages);
+        return;
+    }
+
     const auto& map = pages.activeMapping();
     const uint16_t accent = toRgb565(map.ledColour);
 
@@ -103,6 +109,12 @@ void DisplayRenderer::refreshValues(const PageManager& pages) {
     // ENV pages: check all envelope CCs, redraw curve if any moved
     if (pages.currentPage() == PageID::ENV) {
         refreshEnvelopePage(pages);
+        return;
+    }
+
+    // SEQ pages: check step values, redraw changed bars
+    if (pages.currentPage() == PageID::SEQ) {
+        refreshSequencerPage(pages);
         return;
     }
 
@@ -268,43 +280,35 @@ void DisplayRenderer::drawValueBar(uint16_t x, uint16_t y, uint16_t w,
 // ENV page — read parameters
 // =============================================================================
 // Extracts all ADSR + curve + depth CCs from the active page mapping.
-// ADSR comes from pots (first 4 slots).
-// Curves come from encoders (scans for CONT type after SUB_SEL entries).
-// Depth comes from encoder BIPOLAR type (PITCH sub-page only).
+// ADSR on pots 0–3.  Curves + depth on pots 4–7 (moved from encoders).
+// Scanning by CtrlType keeps this in sync with PageMappings.h automatically.
 
 EnvParams DisplayRenderer::readEnvParams(const PageManager& pages) const {
     const auto& map = pages.activeMapping();
     const ControlSlot* pots = (pages.potScene() == Scene::A)
                               ? map.potsA : map.potsB;
-    const ControlSlot* encs = (pages.encScene() == Scene::A)
-                              ? map.encsA : map.encsB;
 
     EnvParams p = {};
 
-    // ADSR from pots 0–3, with optional pot direction inversion
-    for (uint8_t i = 0; i < 4; ++i) {
-        uint8_t raw = pots[i].isActive() ? pages.getCCValue(pots[i].cc) : 0;
-        if (INVERT_POT) raw = 127 - raw;
-        // Store in A/D/S/R fields
-        switch (i) {
-            case 0: p.a = raw; break;
-            case 1: p.d = raw; break;
-            case 2: p.s = raw; break;
-            case 3: p.r = raw; break;
-        }
-    }
+    // ADSR from pots 0–3 (no inversion — adcToCC already handles direction)
+    p.a = pots[0].isActive() ? pages.getCCValue(pots[0].cc) : 0;
+    p.d = pots[1].isActive() ? pages.getCCValue(pots[1].cc) : 0;
+    p.s = pots[2].isActive() ? pages.getCCValue(pots[2].cc) : 0;
+    p.r = pots[3].isActive() ? pages.getCCValue(pots[3].cc) : 0;
 
-    // Scan encoders for curve CCs (CONT) and depth (BIPOLAR)
+    // Curves + depth from pots 4–7
+    // Scan by type: CONT = curve CC, BIPOLAR = depth (PITCH sub-page only)
     uint8_t curveSlots[3] = {64, 64, 64};  // default to linear if missing
     uint8_t curveIdx = 0;
     p.hasDepth = false;
 
-    for (uint8_t i = 0; i < 8; ++i) {
-        if (encs[i].type == CtrlType::CONT && curveIdx < 3) {
-            curveSlots[curveIdx++] = pages.getCCValue(encs[i].cc);
-        } else if (encs[i].type == CtrlType::BIPOLAR) {
-            p.depth    = (int8_t)pages.getCCValue(encs[i].cc) - 64;
+    for (uint8_t i = 4; i < 8; ++i) {
+        if (!pots[i].isActive()) continue;
+        if (pots[i].type == CtrlType::BIPOLAR) {
+            p.depth    = (int8_t)pages.getCCValue(pots[i].cc) - 64;
             p.hasDepth = true;
+        } else if (pots[i].type == CtrlType::CONT && curveIdx < 3) {
+            curveSlots[curveIdx++] = pages.getCCValue(pots[i].cc);
         }
     }
     p.crvA = curveSlots[0];
@@ -568,18 +572,18 @@ void DisplayRenderer::drawEnvelopeCurve(const EnvParams& env,
 
     // ── 8 pot indicator dots ────────────────────────────────────────────────
     // Row of 8 circles mirroring the Angle8 pot LEDs.
-    // Pots 0–3 (ADSR): bright accent.  Pots 4–7 (unused): dim outline.
+    // Active pots: bright accent.  Unused: dim outline.
+    // AMP/FILTER: 7 active (ADSR + 3 curves). PITCH: 8 (+ depth).
     {
+        const uint8_t activePots = env.hasDepth ? 8 : 7;
         const uint16_t dotSpacing = 30;
         const uint16_t dotStartX = (SCREEN_W - 7 * dotSpacing) / 2;
 
         for (uint8_t i = 0; i < 8; ++i) {
             const uint16_t cx = dotStartX + i * dotSpacing;
-            if (i < 4) {
-                // Active ADSR pot — filled accent dot
+            if (i < activePots) {
                 gfx_->fillCircle(cx, ENV_DOT_Y, 4, accentColour);
             } else {
-                // Unused pot — dim outline ring
                 gfx_->drawCircle(cx, ENV_DOT_Y, 4, COL_DIM_DOT);
             }
         }
@@ -610,6 +614,127 @@ void DisplayRenderer::drawEnvelopeCurve(const EnvParams& env,
         if (env.depth > 0) gfx_->print("+");
         gfx_->print(env.depth);
     }
+}
+
+// =============================================================================
+// SEQ page — full draw
+// =============================================================================
+// Draws 8 vertical bars representing step values, with a connecting line
+// through the bar tops for visual flow.  Step numbers shown at baseline.
+
+void DisplayRenderer::drawSequencerPage(const PageManager& pages) {
+    const uint16_t accent = toRgb565(pages.activeMapping().ledColour);
+    const uint8_t baseStep = (pages.potScene() == Scene::B) ? 8 : 0;
+
+    // Draw all 8 bars
+    for (uint8_t i = 0; i < 8; ++i) {
+        const uint8_t val = pages.getStepValue(baseStep + i);
+        drawSequencerBar(i, val, accent, baseStep + i + 1);
+        prevValues_[i] = val;
+    }
+
+    // Connecting line through bar tops
+    const uint16_t padX     = 16;
+    const uint16_t padTop   = 20;
+    const uint16_t padBot   = 24;
+    const uint16_t drawW    = SCREEN_W - 2 * padX;
+    const uint16_t baselineY = PARAM_AREA_Y + PARAM_AREA_H - padBot;
+    const uint16_t maxBarH  = PARAM_AREA_H - padTop - padBot;
+    const uint16_t barGap   = 6;
+    const uint16_t barW     = (drawW - 7 * barGap) / 8;
+    const uint16_t dimAccent = dimColour(accent, 1);
+
+    int16_t prevTopX = 0, prevTopY = 0;
+    for (uint8_t i = 0; i < 8; ++i) {
+        const uint8_t val = pages.getStepValue(baseStep + i);
+        const uint16_t barX = padX + i * (barW + barGap);
+        const uint16_t barH = (uint32_t)val * maxBarH / 127;
+        const int16_t topX = (int16_t)(barX + barW / 2);
+        const int16_t topY = (int16_t)(baselineY - barH);
+
+        if (i > 0) {
+            gfx_->drawLine(prevTopX, prevTopY, topX, topY, dimAccent);
+            gfx_->drawLine(prevTopX, prevTopY + 1, topX, topY + 1, dimAccent);
+        }
+        prevTopX = topX;
+        prevTopY = topY;
+    }
+
+    // Baseline
+    gfx_->drawFastHLine(padX, baselineY, drawW, COL_GRID);
+
+    // 8 pot indicator dots (all active on SEQ page)
+    {
+        const uint16_t dotSpacing = 30;
+        const uint16_t dotStartX = (SCREEN_W - 7 * dotSpacing) / 2;
+        for (uint8_t i = 0; i < 8; ++i) {
+            gfx_->fillCircle(dotStartX + i * dotSpacing,
+                             PARAM_AREA_Y + 10, 4, accent);
+        }
+    }
+}
+
+// =============================================================================
+// SEQ page — differential refresh
+// =============================================================================
+
+void DisplayRenderer::refreshSequencerPage(const PageManager& pages) {
+    const uint8_t baseStep = (pages.potScene() == Scene::B) ? 8 : 0;
+    bool anyChanged = false;
+
+    for (uint8_t i = 0; i < 8; ++i) {
+        const uint8_t val = pages.getStepValue(baseStep + i);
+        if (val != prevValues_[i]) {
+            anyChanged = true;
+            break;
+        }
+    }
+    if (!anyChanged) return;
+
+    // Erase param area and redraw (connecting line means full redraw)
+    const uint16_t accent = toRgb565(pages.activeMapping().ledColour);
+    gfx_->fillRect(0, PARAM_AREA_Y, SCREEN_W, PARAM_AREA_H, COL_BG);
+    drawSequencerPage(pages);
+}
+
+// =============================================================================
+// SEQ page — single bar
+// =============================================================================
+// Draws one rounded vertical bar + step number label.
+
+void DisplayRenderer::drawSequencerBar(uint8_t idx, uint8_t value,
+                                       uint16_t accent, uint8_t stepNum) {
+    const uint16_t padX     = 16;
+    const uint16_t padTop   = 20;
+    const uint16_t padBot   = 24;
+    const uint16_t drawW    = SCREEN_W - 2 * padX;
+    const uint16_t baselineY = PARAM_AREA_Y + PARAM_AREA_H - padBot;
+    const uint16_t maxBarH  = PARAM_AREA_H - padTop - padBot;
+    const uint16_t barGap   = 6;
+    const uint16_t barW     = (drawW - 7 * barGap) / 8;
+    const uint16_t barX     = padX + idx * (barW + barGap);
+    const uint16_t barH     = (uint32_t)value * maxBarH / 127;
+    const uint16_t barY     = baselineY - barH;
+
+    // Filled bar with rounded top (radius 3px)
+    if (barH > 6) {
+        gfx_->fillRoundRect(barX, barY, barW, barH, 3, accent);
+    } else if (barH > 0) {
+        gfx_->fillRect(barX, barY, barW, barH, accent);
+    }
+
+    // Thin outline for empty bars (shows slot position even at value 0)
+    if (barH == 0) {
+        gfx_->drawRoundRect(barX, baselineY - 4, barW, 4, 1,
+                            dimColour(accent, 2));
+    }
+
+    // Step number label below baseline
+    gfx_->setTextColor(COL_LABEL);
+    gfx_->setTextSize(1);
+    const uint16_t labelX = barX + (barW / 2) - (stepNum >= 10 ? 6 : 3);
+    gfx_->setCursor(labelX, baselineY + 6);
+    gfx_->print(stepNum);
 }
 
 // =============================================================================
