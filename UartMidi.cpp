@@ -64,9 +64,43 @@ void UartMidi::poll() {
 
 void UartMidi::sendCC(uint8_t cc, uint8_t value, uint8_t channel) {
     if (!midiTeensy) return;
-    // CCs above 127 are internal-only — they must use SysEx, not wire CC
-    if (cc > 127) return;
-    midiTeensy->sendControlChange(cc, value, channel);
+
+    if (cc <= 127) {
+        // Standard MIDI CC — fits in the 7-bit CC number field
+        midiTeensy->sendControlChange(cc, value, channel);
+        return;
+    }
+
+    // ── Extended CC (128+) — wrap in JT-8000 SysEx ──────────────────────
+    // CCs above 127 (envelope curves 147-155, perf params 140-146) cannot
+    // travel as standard MIDI CC messages because the CC number field is
+    // only 7 bits. We wrap them in a lightweight SysEx message that the
+    // Teensy's SysExAdapter dispatches to the same handleControlChange()
+    // path as normal CCs.
+    //
+    // Wire format (11 bytes, all body bytes 7-bit safe):
+    //   F0 7D 4A 54 00 20 <ch> <cc_hi> <cc_lo> <val> F7
+    //
+    // cc_hi/cc_lo split mirrors SyxProtocol.h paramId encoding.
+    // Keep these constants in sync with SyxProtocol.h on the Teensy side.
+    static constexpr uint8_t kMfrId   = 0x7D;  // MMA non-commercial
+    static constexpr uint8_t kSubIdJ  = 0x4A;  // 'J'
+    static constexpr uint8_t kSubIdT  = 0x54;  // 'T'
+    static constexpr uint8_t kDevId   = 0x00;  // default device
+    static constexpr uint8_t kMsgType = 0x20;  // EXT_CC
+
+    const uint8_t msg[11] = {
+        0xF0,
+        kMfrId, kSubIdJ, kSubIdT,
+        kDevId,
+        kMsgType,
+        (uint8_t)(channel & 0x7F),
+        (uint8_t)((cc >> 7) & 0x7F),   // cc_hi
+        (uint8_t)(cc & 0x7F),           // cc_lo
+        (uint8_t)(value & 0x7F),
+        0xF7
+    };
+    midiTeensy->sendSysEx(11, msg, true);
 }
 
 void UartMidi::sendNoteOn(uint8_t note, uint8_t velocity, uint8_t channel) {

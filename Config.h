@@ -34,7 +34,7 @@ static constexpr uint32_t I2C_CLOCK_HZ  = 50000;
 // ─────────────────────────────────────────────────────────────────────────────
 static constexpr uint8_t  UART_TX_PIN   = 17;
 static constexpr uint8_t  UART_RX_PIN   = 18;
-static constexpr uint32_t UART_BAUD     = 115200;
+static constexpr uint32_t UART_BAUD     = 31250;
 // ESP32-S3 UART peripheral index (0 = debug console, 1 = Teensy link)
 static constexpr uint8_t  UART_NUM      = 1;
 

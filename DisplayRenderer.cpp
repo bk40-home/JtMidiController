@@ -2,7 +2,8 @@
 // DisplayRenderer.cpp
 // =============================================================================
 #include "DisplayRenderer.h"
-#include <math.h>  // powf — ESP32 has hardware FPU, so float math is cheap
+#include "ParamDefs.h"   // findByCC() for SELECT option text lookup
+#include <math.h>        // powf — ESP32 has hardware FPU
 
 // ── TCA9554 reset sequence — matches the working Waveshare demo exactly ─────
 
@@ -35,7 +36,7 @@ bool DisplayRenderer::begin() {
     gfx_ = new Arduino_ST7796(
         bus_,
         Config::DISP_RST,    // RST = -1 (via TCA9554)
-        1,                    // rotation (landscape: 480 wide × 320 tall)
+        3,                    // rotation (landscape: 480 wide × 320 tall)
         true,                 // IPS = true (matches working demo)
         Config::DISP_WIDTH,   // 320 (native width)
         Config::DISP_HEIGHT   // 480 (native height)
@@ -85,16 +86,44 @@ void DisplayRenderer::drawPage(const PageManager& pages) {
     const auto& map = pages.activeMapping();
     const uint16_t accent = toRgb565(map.ledColour);
 
-    // Draw pots (active scene)
+    // Pot and encoder arrays for the active scenes
     const ControlSlot* pots = (pages.potScene() == Scene::A)
                               ? map.potsA : map.potsB;
+    const ControlSlot* encs = (pages.encScene() == Scene::A)
+                              ? map.encsA : map.encsB;
+
+    // Collect active encoders (skip SUB_SEL and NONE) for filling empty cells.
+    // The queue preserves encoder order so params appear in a logical sequence.
+    uint8_t encQueue[8];
+    uint8_t encCount = 0;
+    for (uint8_t i = 0; i < 8 && encCount < 8; ++i) {
+        if (encs[i].isActive() && !encs[i].isSubSel()) {
+            encQueue[encCount++] = i;
+        }
+    }
+
+    uint8_t nextEnc = 0;  // next encoder to place in an empty cell
+
     for (uint8_t i = 0; i < 8; ++i) {
         const uint8_t col = i % 4;
         const uint8_t row = i / 4;
-        const uint8_t val = pages.getCCValue(pots[i].cc);
-        const bool seeking = pages.pickup().isSeeking(i);
-        drawParamCell(col, row, pots[i], val, seeking, accent);
-        prevValues_[i] = val;  // seed cache so refreshValues knows the baseline
+
+        if (pots[i].isActive()) {
+            // Pot cell — standard rendering
+            const uint8_t val = pages.getCCValue(pots[i].cc);
+            const bool seeking = pages.pickup().isSeeking(i);
+            drawParamCell(col, row, pots[i], val, seeking, accent, false);
+            prevValues_[i] = val;
+        } else if (nextEnc < encCount) {
+            // Empty pot slot — fill with next available encoder value
+            const ControlSlot& enc = encs[encQueue[nextEnc++]];
+            const uint8_t val = pages.getCCValue(enc.cc);
+            drawParamCell(col, row, enc, val, false, accent, true);
+            prevValues_[i] = val;
+        } else {
+            // Truly empty — leave blank
+            prevValues_[i] = 0xFF;
+        }
     }
 }
 
@@ -118,18 +147,45 @@ void DisplayRenderer::refreshValues(const PageManager& pages) {
         return;
     }
 
-    // Normal pages: per-cell dirty check
+    // Normal pages: rebuild cell layout (same logic as drawPage) and
+    // redraw only cells whose CC value changed since last frame.
     const auto& map = pages.activeMapping();
     const uint16_t accent = toRgb565(map.ledColour);
     const ControlSlot* pots = (pages.potScene() == Scene::A)
                               ? map.potsA : map.potsB;
+    const ControlSlot* encs = (pages.encScene() == Scene::A)
+                              ? map.encsA : map.encsB;
+
+    // Rebuild encoder queue (must match drawPage order exactly)
+    uint8_t encQueue[8];
+    uint8_t encCount = 0;
+    for (uint8_t i = 0; i < 8 && encCount < 8; ++i) {
+        if (encs[i].isActive() && !encs[i].isSubSel()) {
+            encQueue[encCount++] = i;
+        }
+    }
+
+    uint8_t nextEnc = 0;
 
     for (uint8_t i = 0; i < 8; ++i) {
-        if (!pots[i].isActive()) continue;
-        const uint8_t val = pages.getCCValue(pots[i].cc);
+        const ControlSlot* slot = nullptr;
+        bool isEnc = false;
+        bool seeking = false;
+
+        if (pots[i].isActive()) {
+            slot = &pots[i];
+            seeking = pages.pickup().isSeeking(i);
+        } else if (nextEnc < encCount) {
+            slot = &encs[encQueue[nextEnc++]];
+            isEnc = true;
+        }
+
+        if (!slot) continue;  // truly empty cell
+
+        const uint8_t val = pages.getCCValue(slot->cc);
         if (val != prevValues_[i]) {
             prevValues_[i] = val;
-            drawParamCell(i % 4, i / 4, pots[i], val, false, accent);
+            drawParamCell(i % 4, i / 4, *slot, val, seeking, accent, isEnc);
         }
     }
 }
@@ -204,75 +260,126 @@ void DisplayRenderer::drawFooter(const PageManager& pages) {
 // =============================================================================
 // Parameter cell (normal pages)
 // =============================================================================
+// Renders one cell of the 2×4 grid.  Pot cells get standard styling;
+// encoder cells get a subtly darker background and muted text.
+// CONT / ENV / BIPOLAR types show a vertical bar on the right edge.
+// SELECT / TOGGLE types show only the value text (no gauge — discrete values
+// don't benefit from a position indicator).
 
 void DisplayRenderer::drawParamCell(uint8_t col, uint8_t row,
                                     const ControlSlot& slot,
                                     uint8_t value, bool seeking,
-                                    uint16_t accentColour) {
+                                    uint16_t accentColour,
+                                    bool isEncoder) {
     const uint16_t x = col * CELL_W;
     const uint16_t y = PARAM_AREA_Y + row * CELL_H;
 
-    // Clear cell background
-    gfx_->fillRect(x + 1, y + 1, CELL_W - 2, CELL_H - 2, COL_BG);
+    // Cell background — slightly darker for encoder cells
+    const uint16_t bgCol   = isEncoder ? COL_ENC_BG  : COL_BG;
+    const uint16_t lblCol  = isEncoder ? COL_ENC_LABEL : COL_LABEL;
+    const uint16_t valCol  = seeking   ? COL_SEEKING
+                           : isEncoder ? COL_ENC_TEXT : COL_TEXT;
+
+    gfx_->fillRect(x + 1, y + 1, CELL_W - 2, CELL_H - 2, bgCol);
 
     if (!slot.isActive()) return;  // unmapped slot — leave blank
 
-    const uint16_t textCol = seeking ? COL_SEEKING : COL_TEXT;
-
     // Label (top of cell)
-    gfx_->setTextColor(COL_LABEL);
+    gfx_->setTextColor(lblCol);
     gfx_->setTextSize(1);
     gfx_->setCursor(x + 4, y + 4);
     gfx_->print(slot.label);
 
-    // Value (large, centred)
-    gfx_->setTextColor(textCol);
-    gfx_->setTextSize(3);
-    gfx_->setCursor(x + 4, y + 20);
+    // Value display — varies by type
+    gfx_->setTextColor(valCol);
+
+    const bool showBar = (slot.type == CtrlType::CONT
+                       || slot.type == CtrlType::ENV
+                       || slot.type == CtrlType::BIPOLAR);
 
     if (slot.type == CtrlType::TOGGLE) {
+        // Large centred ON/OFF — no gauge
+        gfx_->setTextSize(3);
+        gfx_->setCursor(x + 4, y + CELL_H / 2 - 8);
         gfx_->print(value > 63 ? "ON" : "OFF");
+
+    } else if (slot.type == CtrlType::SELECT) {
+        // Look up option text from ParamDefs bucket tables.
+        // Converts CC value → bucket index → option name string.
+        const ParamDef* pd = ParamDefs::findByCC(slot.cc);
+        if (pd && pd->optionCount > 0 && pd->options) {
+            uint8_t idx = (uint32_t)value * pd->optionCount / 128;
+            if (idx >= pd->optionCount) idx = pd->optionCount - 1;
+            gfx_->setTextSize(2);
+            gfx_->setCursor(x + 4, y + CELL_H / 2 - 6);
+            gfx_->print(pd->options[idx]);
+        } else {
+            // Fallback — no option table found, show raw number
+            gfx_->setTextSize(3);
+            gfx_->setCursor(x + 4, y + CELL_H / 2 - 8);
+            gfx_->print(value);
+        }
+
     } else if (slot.type == CtrlType::BIPOLAR) {
+        gfx_->setTextSize(3);
+        gfx_->setCursor(x + 4, y + 20);
         const int8_t centred = (int8_t)value - 64;
         if (centred > 0) gfx_->print("+");
         gfx_->print(centred);
-    } else if (slot.type == CtrlType::SELECT) {
-        const char* name = CC::name(slot.cc);
-        if (name) {
-            gfx_->setTextSize(2);
-            gfx_->print(value);
-        } else {
-            gfx_->print(value);
-        }
+
     } else {
+        // CONT, ENV — numeric value
+        gfx_->setTextSize(3);
+        gfx_->setCursor(x + 4, y + 20);
         gfx_->print(value);
     }
 
-    // Value bar (bottom of cell)
-    const uint16_t barY = y + CELL_H - 12;
-    const uint16_t barW = CELL_W - 8;
-    drawValueBar(x + 4, barY, barW, 6, value, accentColour);
+    // Vertical bar gauge (right edge of cell) — only for continuous types
+    if (showBar) {
+        const uint16_t barX = x + CELL_W - 12;  // 12px from right edge
+        const uint16_t barY = y + 6;
+        const uint16_t barW = 6;
+        const uint16_t barH = CELL_H - 12;
+
+        // Background track
+        gfx_->fillRoundRect(barX, barY, barW, barH, 3, COL_HEADER);
+
+        if (slot.type == CtrlType::BIPOLAR) {
+            // Centre tick
+            const uint16_t midY = barY + barH / 2;
+            gfx_->drawFastHLine(barX - 2, midY, barW + 4, COL_GRID);
+
+            if (value > 64) {
+                // Positive: fill upward from centre
+                const uint16_t fillH = (uint32_t)(value - 64) * (barH / 2) / 63;
+                if (fillH > 0) {
+                    gfx_->fillRoundRect(barX, midY - fillH, barW, fillH,
+                                        2, accentColour);
+                }
+            } else if (value < 64) {
+                // Negative: fill downward from centre
+                const uint16_t fillH = (uint32_t)(64 - value) * (barH / 2) / 64;
+                if (fillH > 0) {
+                    gfx_->fillRoundRect(barX, midY, barW, fillH,
+                                        2, accentColour);
+                }
+            }
+        } else {
+            // CONT / ENV: fill from bottom proportional to value
+            const uint16_t fillH = (uint32_t)value * barH / 127;
+            if (fillH > 0) {
+                gfx_->fillRoundRect(barX, barY + barH - fillH, barW, fillH,
+                                    2, accentColour);
+            }
+        }
+    }
 
     // Seeking arrow indicator
     if (seeking) {
         gfx_->setTextColor(COL_ACCENT);
         gfx_->setTextSize(2);
         gfx_->setCursor(x + CELL_W - 20, y + 20);
-        gfx_->print(value < 64 ? "\x18" : "\x19");  // up/down arrows
-    }
-}
-
-// =============================================================================
-// Value bar (normal pages)
-// =============================================================================
-
-void DisplayRenderer::drawValueBar(uint16_t x, uint16_t y, uint16_t w,
-                                   uint16_t h, uint8_t value,
-                                   uint16_t colour) {
-    gfx_->fillRect(x, y, w, h, COL_HEADER);               // background
-    const uint16_t fillW = (uint32_t)value * w / 127;
-    if (fillW > 0) {
-        gfx_->fillRect(x, y, fillW, h, colour);            // proportional fill
+        gfx_->print(value < 64 ? "\x18" : "\x19");
     }
 }
 
@@ -351,7 +458,7 @@ void DisplayRenderer::refreshEnvelopePage(const PageManager& pages) {
 // =============================================================================
 // ENV page — ADSR curve drawing
 // =============================================================================
-// Draws the full ADSR curve, translucent fill, vertex dots, 8 pot indicator
+// Draws the full ADSR curve, translucent fill, vertex dots, stage labels,
 // dots, stage labels, and (for PITCH) the depth indicator.
 //
 // SEGMENT WIDTHS:
@@ -570,25 +677,6 @@ void DisplayRenderer::drawEnvelopeCurve(const EnvParams& env,
     gfx_->fillCircle(xR,   sustY,  5, accentColour); // sustain end (start of release)
     gfx_->fillCircle(xEnd, baseY,  3, dimAccent);    // release end (returns to baseline)
 
-    // ── 8 pot indicator dots ────────────────────────────────────────────────
-    // Row of 8 circles mirroring the Angle8 pot LEDs.
-    // Active pots: bright accent.  Unused: dim outline.
-    // AMP/FILTER: 7 active (ADSR + 3 curves). PITCH: 8 (+ depth).
-    {
-        const uint8_t activePots = env.hasDepth ? 8 : 7;
-        const uint16_t dotSpacing = 30;
-        const uint16_t dotStartX = (SCREEN_W - 7 * dotSpacing) / 2;
-
-        for (uint8_t i = 0; i < 8; ++i) {
-            const uint16_t cx = dotStartX + i * dotSpacing;
-            if (i < activePots) {
-                gfx_->fillCircle(cx, ENV_DOT_Y, 4, accentColour);
-            } else {
-                gfx_->drawCircle(cx, ENV_DOT_Y, 4, COL_DIM_DOT);
-            }
-        }
-    }
-
     // ── Stage labels along the baseline ─────────────────────────────────────
     gfx_->setTextColor(COL_GRID);
     gfx_->setTextSize(1);
@@ -662,16 +750,6 @@ void DisplayRenderer::drawSequencerPage(const PageManager& pages) {
 
     // Baseline
     gfx_->drawFastHLine(padX, baselineY, drawW, COL_GRID);
-
-    // 8 pot indicator dots (all active on SEQ page)
-    {
-        const uint16_t dotSpacing = 30;
-        const uint16_t dotStartX = (SCREEN_W - 7 * dotSpacing) / 2;
-        for (uint8_t i = 0; i < 8; ++i) {
-            gfx_->fillCircle(dotStartX + i * dotSpacing,
-                             PARAM_AREA_Y + 10, 4, accent);
-        }
-    }
 }
 
 // =============================================================================

@@ -20,7 +20,6 @@
 //   ┌──────────────────────────────────────────────────────────────┐
 //   │  HEADER: "AMP ENVELOPE" │ Scene A/B                          │  28px
 //   ├──────────────────────────────────────────────────────────────┤
-//   │  ● ● ● ● ○ ○ ○ ○   ← 8 pot dots (4 active, 4 dim)        │
 //   │                                                              │
 //   │        /\                                                    │
 //   │       /  \__________                                        │
@@ -97,7 +96,8 @@ private:
     Arduino_DataBus*  bus_   = nullptr;
     bool              ready_ = false;
 
-    // ── Normal page cache — per-pot CC values for dirty detection ────────────
+    // ── Normal page cache — per-cell CC values for dirty detection ─────────
+    // Tracks whatever is displayed in each cell (pot or encoder value)
     uint8_t prevValues_[8] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
 
     // ── ENV page cache — full parameter snapshot for dirty detection ─────────
@@ -117,7 +117,6 @@ private:
     static constexpr uint16_t ENV_PAD_X    = 20;   // left/right margin
     static constexpr uint16_t ENV_PAD_TOP  = 22;   // below pot dots row
     static constexpr uint16_t ENV_PAD_BOT  = 22;   // above stage labels
-    static constexpr uint16_t ENV_DOT_Y    = PARAM_AREA_Y + 10;  // pot dot row
 
     // Points per curved segment (attack, decay, release).
     // 16 gives smooth visual; sustain is a straight line.
@@ -132,13 +131,15 @@ private:
 
     // ── Colour theme (RGB565) ───────────────────────────────────────────────
     static constexpr uint16_t COL_BG       = 0x1082;  // dark navy
+    static constexpr uint16_t COL_ENC_BG   = 0x10A2;  // slightly lighter for encoder cells
     static constexpr uint16_t COL_HEADER   = 0x18E3;  // slightly lighter
     static constexpr uint16_t COL_TEXT     = 0xFFFF;  // white
+    static constexpr uint16_t COL_ENC_TEXT = 0xBDF7;  // muted white for encoder values
     static constexpr uint16_t COL_LABEL    = 0x94B2;  // grey
+    static constexpr uint16_t COL_ENC_LABEL = 0x6B4D; // dimmer label for encoder cells
     static constexpr uint16_t COL_ACCENT   = 0xFC00;  // orange
     static constexpr uint16_t COL_SEEKING  = 0x4A49;  // dim
     static constexpr uint16_t COL_GRID     = 0x18C3;  // faint grid lines
-    static constexpr uint16_t COL_DIM_DOT  = 0x2124;  // inactive pot dot
 
     // ── Colour utilities ────────────────────────────────────────────────────
     static uint16_t toRgb565(uint32_t rgb);
@@ -153,9 +154,8 @@ private:
     void drawHeader(const PageManager& pages);
     void drawFooter(const PageManager& pages);
     void drawParamCell(uint8_t col, uint8_t row, const ControlSlot& slot,
-                       uint8_t value, bool seeking, uint16_t accentColour);
-    void drawValueBar(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
-                      uint8_t value, uint16_t colour);
+                       uint8_t value, bool seeking, uint16_t accentColour,
+                       bool isEncoder = false);
 
     // ── ENV page rendering ──────────────────────────────────────────────────
     EnvParams readEnvParams(const PageManager& pages) const;

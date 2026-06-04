@@ -89,8 +89,13 @@ static Scene    prevPotScene = Scene::A;
 
 // PageManager sends CCs through this callback → UART + USB MIDI
 static void onSendCC(uint8_t cc, uint8_t value) {
+    // UART MIDI handles CC > 127 internally (wraps in SysEx)
     uartMidi.sendCC(cc, value);
-    USBMIDI.sendControlChange(cc, value, Config::MIDI_CHANNEL);
+    // USB MIDI has the same 7-bit CC number limitation — skip extended CCs.
+    // Extended params reach JUCE via the Teensy's SysEx echo path instead.
+    if (cc <= 127) {
+        USBMIDI.sendControlChange(cc, value, Config::MIDI_CHANNEL);
+    }
 }
 
 // Incoming CCs from Teensy → update PageManager's local CC cache
