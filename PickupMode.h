@@ -17,6 +17,15 @@
 // PICKUP THRESHOLD:
 //   The pot picks up when it crosses within ±PICKUP_THRESHOLD of the target.
 //   A tight threshold (2-3) feels precise; a loose one (5+) is easier to grab.
+//
+// SNAP ON DECISIVE MOVE (Config::PICKUP_SNAP_CC):
+//   At ~1 kHz polling even a fast user twist is sub-1-CC per poll, so
+//   per-poll-delta detection is unreliable. Instead, on the first process()
+//   call after seeking begins, the current pot reading is latched as the
+//   seek-start anchor. If the pot subsequently moves ≥ PICKUP_SNAP_CC units
+//   away from that anchor, the pot picks up immediately regardless of the
+//   target value — that's what the user means by a "decisive move".
+//   PICKUP_SNAP_CC = 0 disables snap entirely (pure pickup behaviour).
 // =============================================================================
 #pragma once
 
@@ -27,12 +36,17 @@ class PickupMode {
 public:
     static constexpr uint8_t kNumPots   = 8;
     static constexpr uint8_t kThreshold = Config::PICKUP_THRESHOLD;
+    // 0 = snap disabled; otherwise the CC-unit distance from the seek-start
+    // anchor that counts as a "decisive move" and forces pickup.
+    static constexpr uint8_t kSnapCC    = Config::PICKUP_SNAP_CC;
 
     PickupMode() = default;
 
     // ── Page change handling ────────────────────────────────────────────────
     // Call when the page or scene changes. Sets all pots to "seeking" state
-    // with the given target CC values.
+    // with the given target CC values. The seek-start anchor for each pot is
+    // latched lazily on the first process() call (we don't have the pot
+    // reading at the moment of the page change).
     void onPageChange(const uint8_t targets[kNumPots]);
 
     // Set target for a single pot (e.g. when Teensy sends a CC update)
@@ -53,6 +67,8 @@ public:
     int8_t seekDirection(uint8_t potIdx, uint8_t currentCC) const;
 
 private:
-    uint8_t targets_[kNumPots]  = {};    // target CC values
-    bool    seeking_[kNumPots]  = {};    // true = pot hasn't picked up yet
+    uint8_t targets_[kNumPots]      = {};   // target CC values
+    uint8_t seekStartCC_[kNumPots]  = {};   // pot reading when seeking began
+    bool    seeking_[kNumPots]      = {};   // true = pot hasn't picked up yet
+    bool    seekStarted_[kNumPots]  = {};   // seekStartCC_ latched for this seek
 };

@@ -185,7 +185,11 @@ void DisplayRenderer::refreshValues(const PageManager& pages) {
         const uint8_t val = pages.getCCValue(slot->cc);
         if (val != prevValues_[i]) {
             prevValues_[i] = val;
-            drawParamCell(i % 4, i / 4, *slot, val, seeking, accent, isEnc);
+            // labelStays=true → cell label is left intact, only the value
+            // text and bar gauge are erased + redrawn. Eliminates the brief
+            // label flicker that happened on every value change.
+            drawParamCell(i % 4, i / 4, *slot, val, seeking, accent, isEnc,
+                          /*labelStays=*/true);
         }
     }
 }
@@ -270,7 +274,7 @@ void DisplayRenderer::drawParamCell(uint8_t col, uint8_t row,
                                     const ControlSlot& slot,
                                     uint8_t value, bool seeking,
                                     uint16_t accentColour,
-                                    bool isEncoder) {
+                                    bool isEncoder, bool labelStays) {
     const uint16_t x = col * CELL_W;
     const uint16_t y = PARAM_AREA_Y + row * CELL_H;
 
@@ -280,15 +284,24 @@ void DisplayRenderer::drawParamCell(uint8_t col, uint8_t row,
     const uint16_t valCol  = seeking   ? COL_SEEKING
                            : isEncoder ? COL_ENC_TEXT : COL_TEXT;
 
-    gfx_->fillRect(x + 1, y + 1, CELL_W - 2, CELL_H - 2, bgCol);
+    // Refresh path (labelStays=true) only erases the value + bar area below
+    // the label row — the static label stays put. Full paint (labelStays=
+    // false) erases the whole cell and redraws the label.
+    if (labelStays) {
+        gfx_->fillRect(x + 1, y + 14, CELL_W - 2, CELL_H - 15, bgCol);
+    } else {
+        gfx_->fillRect(x + 1, y + 1, CELL_W - 2, CELL_H - 2, bgCol);
+    }
 
     if (!slot.isActive()) return;  // unmapped slot — leave blank
 
-    // Label (top of cell)
-    gfx_->setTextColor(lblCol);
-    gfx_->setTextSize(1);
-    gfx_->setCursor(x + 4, y + 4);
-    gfx_->print(slot.label);
+    // Label only on the full-paint path
+    if (!labelStays) {
+        gfx_->setTextColor(lblCol);
+        gfx_->setTextSize(1);
+        gfx_->setCursor(x + 4, y + 4);
+        gfx_->print(slot.label);
+    }
 
     // Value display — varies by type
     gfx_->setTextColor(valCol);
@@ -438,381 +451,712 @@ void DisplayRenderer::drawEnvelopePage(const PageManager& pages) {
 }
 
 // =============================================================================
-// ENV page — differential refresh
+// ENV page — differential refresh with partial redraw
 // =============================================================================
-// Only redraws the curve when at least one of the 7+ CCs has changed.
-// Avoids SPI traffic on idle frames.
+// Three update categories from cheapest to most expensive:
+//   1. Depth-only change (PITCH page): repaint the depth-text rect only.
+//   2. Curve-only change (one of crvA/crvD/crvR, or sustain level): erase the
+//      affected segment by retracing it in COL_BG with the OLD exponent, then
+//      paint the new segment in accent with the NEW exponent. Adjacent vertex
+//      dots are repainted to restore any pixels the erase clipped.
+//   3. Geometry change (any of a/d/r): segment x positions move → full redraw.
+//
+// The cumulative-equality short-circuit at the top means an idle page costs
+// one EnvParams snapshot + one struct compare per frame.
 
 void DisplayRenderer::refreshEnvelopePage(const PageManager& pages) {
     const EnvParams now = readEnvParams(pages);
     if (now == prevEnv_) return;  // nothing changed — skip entirely
 
-    prevEnv_ = now;
     const uint16_t accent = toRgb565(pages.activeMapping().ledColour);
 
-    // Erase the param area and redraw the curve
-    gfx_->fillRect(0, PARAM_AREA_Y, SCREEN_W, PARAM_AREA_H, COL_BG);
-    drawEnvelopeCurve(now, accent);
+    // a / d / r change moves the segment X positions — only a full redraw
+    // can put everything in the right place.
+    if (now.a != prevEnv_.a || now.d != prevEnv_.d || now.r != prevEnv_.r) {
+        gfx_->fillRect(0, PARAM_AREA_Y, SCREEN_W, PARAM_AREA_H, COL_BG);
+        drawEnvelopeCurve(now, accent);
+        prevEnv_ = now;
+        return;
+    }
+
+    // No x-geometry change — partial redraw path.
+    // Sustain change moves the D→R vertex y, so both D and R need a redraw.
+    const bool sChanged   = (now.s    != prevEnv_.s);
+    const bool aDirty     = (now.crvA != prevEnv_.crvA);
+    const bool dDirty     = (now.crvD != prevEnv_.crvD) || sChanged;
+    const bool rDirty     = (now.crvR != prevEnv_.crvR) || sChanged;
+    const bool depthDirty = now.hasDepth && (now.depth != prevEnv_.depth);
+
+    // Per-segment erase + redraw. Erase uses prevEnv_ + OLD exponent so it
+    // traces the exact pixel path the old segment drew; redraw uses `now` +
+    // NEW exponent. Each segment is independent so order doesn't matter.
+    if (aDirty) {
+        drawEnvelopeSegment(0, prevEnv_, ccToExponent(prevEnv_.crvA), COL_BG);
+        drawEnvelopeSegment(0, now,      ccToExponent(now.crvA),      accent);
+    }
+    if (dDirty) {
+        drawEnvelopeSegment(1, prevEnv_, ccToExponent(prevEnv_.crvD), COL_BG);
+        drawEnvelopeSegment(1, now,      ccToExponent(now.crvD),      accent);
+    }
+    if (rDirty) {
+        drawEnvelopeSegment(2, prevEnv_, ccToExponent(prevEnv_.crvR), COL_BG);
+        drawEnvelopeSegment(2, now,      ccToExponent(now.crvR),      accent);
+    }
+
+    // The COL_BG erase pass can clip pixels of any vertex dot the segment
+    // brushed past — repaint all four to restore them. Four fillCircle calls,
+    // negligible cost.
+    if (aDirty || dDirty || rDirty) {
+        drawEnvelopeDots(now, accent);
+    }
+
+    // Depth-only change: erase + redraw just the depth-label rect at top-right.
+    if (depthDirty) {
+        const uint16_t drawR = SCREEN_W - ENV_PAD_X;
+        gfx_->fillRect(drawR - 110, PARAM_AREA_Y + 4, 110, 16, COL_BG);
+        gfx_->setTextColor(dimColour(accent, 1));
+        gfx_->setTextSize(2);
+        gfx_->setCursor(drawR - 110, PARAM_AREA_Y + 4);
+        gfx_->print("DEPTH ");
+        if (now.depth > 0) gfx_->print('+');
+        gfx_->print(now.depth);
+    }
+
+    prevEnv_ = now;
+}
+
+// =============================================================================
+// ENV page — single segment painter (used by both full draw and partial redraw)
+// =============================================================================
+// Geometry is recomputed from `env` so the function works for both the OLD
+// erase pass (env = prevEnv_) and the NEW paint pass (env = now). Used for
+// per-segment partial redraw; drawEnvelopeCurve still does its own segment
+// drawing inline because it has everything in scope.
+
+void DisplayRenderer::drawEnvelopeSegment(uint8_t segIdx, const EnvParams& env,
+                                          float exponent, uint16_t colour) {
+    // Geometry — kept in sync with drawEnvelopeCurve. Any change there must
+    // be mirrored here or the partial-redraw erase pass will leak pixels.
+    const uint16_t drawL  = ENV_PAD_X;
+    const uint16_t drawR  = SCREEN_W - ENV_PAD_X;
+    const uint16_t drawW  = drawR - drawL;
+    const uint16_t topY   = PARAM_AREA_Y + ENV_PAD_TOP;
+    const uint16_t botY   = PARAM_AREA_Y + PARAM_AREA_H - ENV_PAD_BOT;
+    const uint16_t drawH  = botY - topY;
+    const int16_t  baseY  = (int16_t)botY;
+
+    const uint16_t wTot = (uint16_t)env.a + env.d + env.r;
+    uint16_t aW = 0, dW = 0, rW = 0;
+    if (wTot > 0) {
+        aW = (uint32_t)env.a * drawW / wTot;
+        dW = (uint32_t)env.d * drawW / wTot;
+        rW = drawW - aW - dW;
+    }
+    const int16_t xA   = (int16_t)drawL;
+    const int16_t xD   = xA + (int16_t)aW;
+    const int16_t xR   = xD + (int16_t)dW;
+    const int16_t xEnd = xR + (int16_t)rW;
+
+    const uint16_t sustPx = (uint32_t)env.s * drawH / 127;
+    const int16_t  peakY  = baseY - (int16_t)drawH;
+    const int16_t  sustY  = baseY - (int16_t)sustPx;
+
+    // Pick segment endpoints
+    int16_t x0, y0, x1, y1;
+    switch (segIdx) {
+        case 0: x0 = xA; y0 = baseY; x1 = xD;   y1 = peakY; break;  // attack
+        case 1: x0 = xD; y0 = peakY; x1 = xR;   y1 = sustY; break;  // decay
+        case 2: x0 = xR; y0 = sustY; x1 = xEnd; y1 = baseY; break;  // release
+        default: return;
+    }
+
+    const int16_t segW = x1 - x0;
+
+    if (segW <= 0) {
+        // Zero-width: vertical line between the two y levels (same handling
+        // as the inline drawSegment lambda in drawEnvelopeCurve).
+        const int16_t yLo = constrain(min(y0, y1), (int16_t)topY, (int16_t)(botY - 1));
+        const int16_t yHi = constrain(max(y0, y1), (int16_t)topY, (int16_t)(botY - 1));
+        gfx_->drawFastVLine(x0, yLo, (yHi - yLo) + 1, colour);
+        return;
+    }
+
+    const uint8_t samples = (uint8_t)min((uint16_t)PTS_PER_SEG, (uint16_t)segW);
+
+    int16_t prevX = x0;
+    int16_t prevY = constrain(y0, (int16_t)topY, (int16_t)(botY - 1));
+
+    for (uint8_t i = 1; i <= samples; ++i) {
+        const float t      = (float)i / samples;
+        const float shaped = powf(t, exponent);
+        const int16_t x    = x0 + (int16_t)(t * segW);
+        int16_t y = y0 + (int16_t)(shaped * (y1 - y0));
+        y = constrain(y, (int16_t)topY, (int16_t)(botY - 1));
+        gfx_->drawLine(prevX, prevY, x, y, colour);
+        prevX = x; prevY = y;
+    }
+}
+
+// =============================================================================
+// ENV page — repaint the four vertex dots
+// =============================================================================
+// Called after partial-segment redraws to restore any dot pixels the COL_BG
+// erase pass clipped. Four fillCircle calls — much cheaper than a full curve
+// redraw.
+
+void DisplayRenderer::drawEnvelopeDots(const EnvParams& env,
+                                       uint16_t accentColour) {
+    // Same geometry as drawEnvelopeCurve / drawEnvelopeSegment.
+    const uint16_t drawL  = ENV_PAD_X;
+    const uint16_t drawR  = SCREEN_W - ENV_PAD_X;
+    const uint16_t drawW  = drawR - drawL;
+    const uint16_t topY   = PARAM_AREA_Y + ENV_PAD_TOP;
+    const uint16_t botY   = PARAM_AREA_Y + PARAM_AREA_H - ENV_PAD_BOT;
+    const uint16_t drawH  = botY - topY;
+    const int16_t  baseY  = (int16_t)botY;
+
+    const uint16_t wTot = (uint16_t)env.a + env.d + env.r;
+    uint16_t aW = 0, dW = 0, rW = 0;
+    if (wTot > 0) {
+        aW = (uint32_t)env.a * drawW / wTot;
+        dW = (uint32_t)env.d * drawW / wTot;
+        rW = drawW - aW - dW;
+    }
+    const int16_t xA   = (int16_t)drawL;
+    const int16_t xD   = xA + (int16_t)aW;
+    const int16_t xR   = xD + (int16_t)dW;
+    const int16_t xEnd = xR + (int16_t)rW;
+
+    const uint16_t sustPx = (uint32_t)env.s * drawH / 127;
+    const int16_t  peakY  = baseY - (int16_t)drawH;
+    const int16_t  sustY  = baseY - (int16_t)sustPx;
+
+    const int16_t peakYc = constrain(peakY, (int16_t)topY, (int16_t)(botY - 1));
+    const int16_t sustYc = constrain(sustY, (int16_t)topY, (int16_t)(botY - 1));
+    const uint16_t dimAccent = dimColour(accentColour, 1);
+
+    gfx_->fillCircle(xA,   baseY,  3, dimAccent);     // origin
+    gfx_->fillCircle(xD,   peakYc, 5, accentColour);  // peak  (A→D)
+    gfx_->fillCircle(xR,   sustYc, 5, accentColour);  // sustain (D→R)
+    gfx_->fillCircle(xEnd, baseY,  3, dimAccent);     // end
 }
 
 // =============================================================================
 // ENV page — ADSR curve drawing
 // =============================================================================
-// Draws the full ADSR curve, translucent fill, vertex dots, stage labels,
-// dots, stage labels, and (for PITCH) the depth indicator.
+// Three back-to-back curves only: Attack (baseline → peak), Decay (peak →
+// sustain level), Release (sustain level → baseline). Total width = drawW.
+// Sustain is conveyed by the y-vertex at the D→R boundary plus the vertex
+// dot there — there is no horizontal hold segment. Time CCs share drawW
+// proportionally; a CC of 0 collapses that segment to zero width (vertical
+// jump). The curve CC for a collapsed segment is a visual no-op, which is
+// exactly what you want for instant-attack / instant-release patches.
 //
-// SEGMENT WIDTHS:
-//   A, D, R durations are proportional to their CC value (after pot inversion).
-//   Sustain hold gets a fixed width — it represents a level, not a time.
-//   A minimum width per segment prevents any segment from collapsing to zero.
+// PITCH sub-page conveys depth via the "DEPTH +N" / "DEPTH -N" text at the
+// top-right only — the curve shape is identical to AMP/FILTER so all three
+// sub-pages are directly comparable at a glance.
 //
-// CURVE SHAPE:
-//   Each segment's shape is t^exponent where t goes 0→1 across the segment.
-//   Attack: y rises from 0 to peak.  Decay: y falls from peak to sustain.
-//   Release: y falls from sustain to 0.  All shaped by their respective
-//   curve CC exponent.
-//
-// PITCH DEPTH:
-//   When depth is present, the baseline shifts to the vertical centre of the
-//   curve area (representing zero pitch shift).  The curve is drawn above
-//   (positive depth) or below (negative depth) the centre line, scaled by
-//   the absolute depth value.
+// OUTLINE: single-pixel drawLine per sample (clean diagonals, ~half the SPI
+// cost of any thickened variant).
+// FILL:    per-sample fillRect spanning prevX → x at curve y, gap-free
+//          horizontally. Step pattern in the top edge is masked visually by
+//          the outline riding on top, and the fill is at ~12% brightness.
+// CLAMP:   every sample y is clamped to [topY, botY-1] before drawing so the
+//          curve can never spill into the stage-label area at extreme params.
 
 void DisplayRenderer::drawEnvelopeCurve(const EnvParams& env,
                                         uint16_t accentColour) {
     // ── Layout geometry ─────────────────────────────────────────────────────
-    const uint16_t drawL = ENV_PAD_X;                          // left edge
-    const uint16_t drawR = SCREEN_W - ENV_PAD_X;               // right edge
-    const uint16_t drawW = drawR - drawL;                      // usable width
-    const uint16_t topY  = PARAM_AREA_Y + ENV_PAD_TOP;         // top of curve area
-    const uint16_t botY  = PARAM_AREA_Y + PARAM_AREA_H - ENV_PAD_BOT; // bottom
-    const uint16_t drawH = botY - topY;                        // usable height
+    const uint16_t drawL = ENV_PAD_X;
+    const uint16_t drawR = SCREEN_W - ENV_PAD_X;
+    const uint16_t drawW = drawR - drawL;
+    const uint16_t topY  = PARAM_AREA_Y + ENV_PAD_TOP;
+    const uint16_t botY  = PARAM_AREA_Y + PARAM_AREA_H - ENV_PAD_BOT;
+    const uint16_t drawH = botY - topY;
 
-    // Baseline Y — for normal envelopes sits at botY.
-    // For PITCH, it's the vertical centre (zero pitch shift).
-    // int16_t so min(y, baseY) and abs(y - baseY) don't hit signed/unsigned mismatch.
-    const int16_t baseY = env.hasDepth ? (topY + drawH / 2) : botY;
+    // Baseline at the bottom of the curve area, curve always upward — same
+    // geometry for AMP/FILTER and PITCH sub-pages.
+    const int16_t  baseY  = (int16_t)botY;
+    const uint16_t curveH = drawH;
 
-    // Curve height — for PITCH, scaled by absolute depth (0..63 → 0..full)
-    // For AMP/FILTER, always full height.
-    const uint16_t curveH = env.hasDepth
-        ? (uint16_t)((uint32_t)abs(env.depth) * (drawH / 2) / 63)
-        : drawH;
+    // ── Segment widths ──────────────────────────────────────────────────────
+    // A + D + R share drawW proportionally. Zero CC → zero width → vertical
+    // jump at that boundary. Release absorbs integer-division rounding so the
+    // total is exactly drawW.
+    const uint16_t wA   = env.a;
+    const uint16_t wD   = env.d;
+    const uint16_t wR   = env.r;
+    const uint16_t wTot = wA + wD + wR;
 
-    // Direction: +1 draws upward from baseline (normal), -1 draws downward
-    // (negative pitch depth).
-    const int8_t direction = (env.hasDepth && env.depth < 0) ? -1 : 1;
-
-    // ── Segment widths (proportional to time CCs) ───────────────────────────
-    // Minimum 8px per segment so nothing vanishes.
-    // Sustain hold = fixed 20% of draw width.
-    static constexpr uint16_t MIN_SEG   = 8;
-    static constexpr float    SUST_FRAC = 0.20f;
-
-    const uint16_t sustW = (uint16_t)(drawW * SUST_FRAC);
-    const uint16_t timeW = drawW - sustW;  // width budget for A + D + R
-
-    // Sum the three time CCs to compute relative proportions
-    const uint16_t aRaw = max((uint16_t)env.a, (uint16_t)1);
-    const uint16_t dRaw = max((uint16_t)env.d, (uint16_t)1);
-    const uint16_t rRaw = max((uint16_t)env.r, (uint16_t)1);
-    const uint16_t timeSum = aRaw + dRaw + rRaw;
-
-    uint16_t aW = max((uint16_t)((uint32_t)aRaw * timeW / timeSum), MIN_SEG);
-    uint16_t dW = max((uint16_t)((uint32_t)dRaw * timeW / timeSum), MIN_SEG);
-    uint16_t rW = max((uint16_t)((uint32_t)rRaw * timeW / timeSum), MIN_SEG);
-
-    // Clamp total to avoid overflow (min segments may have pushed it)
-    const uint16_t totalSeg = aW + dW + sustW + rW;
-    if (totalSeg > drawW) {
-        // Trim release to fit (least visually disruptive)
-        rW = drawW - aW - dW - sustW;
+    uint16_t aW = 0, dW = 0, rW = 0;
+    if (wTot > 0) {
+        aW = (uint32_t)wA * drawW / wTot;
+        dW = (uint32_t)wD * drawW / wTot;
+        rW = drawW - aW - dW;       // absorbs remainder so xEnd == drawR
     }
 
-    // Segment start X positions
-    const uint16_t xA = drawL;             // attack starts here
-    const uint16_t xD = xA + aW;           // decay starts here (= peak)
-    const uint16_t xS = xD + dW;           // sustain starts here
-    const uint16_t xR = xS + sustW;        // release starts here
-    const uint16_t xEnd = xR + rW;         // release ends here
+    // Segment start X — no separate xS now that sustain has no width
+    const int16_t xA   = (int16_t)drawL;
+    const int16_t xD   = xA + (int16_t)aW;          // peak vertex
+    const int16_t xR   = xD + (int16_t)dW;          // sustain vertex (D→R)
+    const int16_t xEnd = xR + (int16_t)rW;          // end of release
 
-    // Sustain level in pixels (0 = no sustain → curve returns to baseline)
-    const uint16_t sustPx = (uint16_t)((uint32_t)env.s * curveH / 127);
+    // Vertical levels
+    const uint16_t sustPx = (uint32_t)env.s * curveH / 127;
+    const int16_t  peakY  = baseY - (int16_t)curveH;
+    const int16_t  sustY  = baseY - (int16_t)sustPx;
 
-    // Peak Y and sustain Y (pixel coords, accounting for direction)
-    const int16_t peakY = baseY - direction * curveH;
-    const int16_t sustY = baseY - direction * sustPx;
-
-    // ── Curve exponents (computed once, used per-segment) ───────────────────
+    // Curve exponents — one powf per sample inside drawSegment uses these
     const float expA = ccToExponent(env.crvA);
     const float expD = ccToExponent(env.crvD);
     const float expR = ccToExponent(env.crvR);
 
-    // ── Draw grid references ────────────────────────────────────────────────
-    // Baseline
+    // ── Baseline ────────────────────────────────────────────────────────────
     gfx_->drawFastHLine(drawL, baseY, drawW, COL_GRID);
 
-    // 50% reference (dashed feel — draw every 6px with 4px gap)
-    if (!env.hasDepth) {
-        const int16_t halfY = topY + drawH / 2;
-        for (uint16_t dx = drawL; dx < drawR; dx += 10) {
-            gfx_->drawFastHLine(dx, halfY, min((uint16_t)6, (uint16_t)(drawR - dx)),
-                                COL_GRID);
+    // ── Stage boundary dashed verticals ─────────────────────────────────────
+    // Skip a marker if either adjacent segment is collapsed (the marker would
+    // land on top of a vertex dot, looks messy).
+    auto drawBoundary = [&](int16_t bx) {
+        for (int16_t dy = (int16_t)topY; dy < (int16_t)botY; dy += 7) {
+            gfx_->drawFastVLine(bx, dy,
+                                min(4, (int)((int16_t)botY - dy)), COL_GRID);
         }
-    }
+    };
+    if (aW > 0 && dW > 0) drawBoundary(xD);
+    if (dW > 0 && rW > 0) drawBoundary(xR);
 
-    // PITCH centre line label
-    if (env.hasDepth) {
-        gfx_->setTextColor(COL_GRID);
-        gfx_->setTextSize(1);
-        gfx_->setCursor(drawL - 12, baseY - 3);
-        gfx_->print("0");
-    }
+    // ── Colours ─────────────────────────────────────────────────────────────
+    const uint16_t dimAccent = dimColour(accentColour, 1);  // 50% accent
 
-    // Stage boundary markers (dashed vertical lines)
-    const uint16_t bounds[] = {xD, xS, xR};
-    for (uint8_t bi = 0; bi < 3; ++bi) {
-        const uint16_t bx = bounds[bi];
-        for (int16_t dy = topY; dy < botY; dy += 7) {
-            gfx_->drawFastVLine(bx, dy, min(4, (int)(botY - dy)), COL_GRID);
+    // ── Curve segment helper ────────────────────────────────────────────────
+    // Draws one parametric segment (x0,y0) → (x1,y1) along y = t^expC.
+    // Zero-width is a clean vertical line. All draw calls bounded by clamp.
+    auto drawSegment = [&](int16_t x0, int16_t y0,
+                           int16_t x1, int16_t y1, float expC) {
+        const int16_t segW = x1 - x0;
+
+        if (segW <= 0) {
+            // Zero-width: clean vertical between the two y levels. The curve
+            // CC for this segment has no visible effect, which is correct —
+            // a zero-time segment has no shape to apply.
+            const int16_t yLo = constrain(min(y0, y1), (int16_t)topY, (int16_t)(botY - 1));
+            const int16_t yHi = constrain(max(y0, y1), (int16_t)topY, (int16_t)(botY - 1));
+            gfx_->drawFastVLine(x0, yLo, (yHi - yLo) + 1, accentColour);
+            return;
         }
-    }
 
-    // ── Colours for fill and outline ────────────────────────────────────────
-    const uint16_t fillCol = dimColour(accentColour, 3);  // ~12% brightness fill
+        // Cap samples to segment width — no overdraw on narrow segments
+        const uint8_t samples = (uint8_t)min((uint16_t)PTS_PER_SEG, (uint16_t)segW);
 
-    // ── Helper lambda: compute curve Y for a parametric t in [0,1] ──────────
-    // Captures baseY, direction, and segment-specific start/end levels.
-    // Inline to avoid function-call overhead in the tight loop.
+        int16_t prevX = x0;
+        int16_t prevY = constrain(y0, (int16_t)topY, (int16_t)(botY - 1));
 
-    // ── Draw segments ───────────────────────────────────────────────────────
-    // Each segment: compute points, draw fill (vlines) then outline (lines).
-    // Drawing fill first ensures the outline sits on top.
+        for (uint8_t i = 1; i <= samples; ++i) {
+            const float t      = (float)i / samples;
+            const float shaped = powf(t, expC);
+            const int16_t x    = x0 + (int16_t)(t * segW);
 
-    int16_t prevX = xA;
-    int16_t prevDrawY = baseY;
+            // Clamp y before any draw so we can never write outside the curve
+            // area (was the root cause of the "lines across the screen" glitch
+            // under extreme parameter combinations).
+            int16_t y = y0 + (int16_t)(shaped * (y1 - y0));
+            y = constrain(y, (int16_t)topY, (int16_t)(botY - 1));
 
-    // --- ATTACK: baseline → peak, shaped by attack exponent ---
-    for (uint8_t i = 1; i <= PTS_PER_SEG; ++i) {
-        const float t = (float)i / PTS_PER_SEG;
-        const float shaped = powf(t, expA);       // 0→1 shaped by curve
-        const int16_t x = xA + (int16_t)(t * aW);
-        // Interpolate from baseY toward peakY
-        const int16_t y = baseY + (int16_t)(shaped * (peakY - baseY));
+            // Single-pixel diagonal line — no fill underneath any more.
+            // (Fill was producing visible step patterns on ramps because
+            // rectangle-based fill of a curve creates stair-step tops, and
+            // the fill colour was bright enough that the steps showed
+            // through the outline. Removing it gives a clean line graphic
+            // that redraws cleanly under partial updates too.)
+            gfx_->drawLine(prevX, prevY, x, y, accentColour);
 
-        // Fill: vertical stripe from curve point to baseline
-        const int16_t fy = min(y, baseY);
-        const int16_t fh = abs(y - baseY);
-        if (fh > 0) gfx_->drawFastVLine(x, fy, fh, fillCol);
-
-        // Outline: 2px thick (draw + 1px offset for visibility)
-        gfx_->drawLine(prevX, prevDrawY, x, y, accentColour);
-        gfx_->drawLine(prevX, prevDrawY + 1, x, y + 1, accentColour);
-
-        prevX = x;
-        prevDrawY = y;
-    }
-
-    // --- DECAY: peak → sustain level, shaped by decay exponent ---
-    for (uint8_t i = 1; i <= PTS_PER_SEG; ++i) {
-        const float t = (float)i / PTS_PER_SEG;
-        const float shaped = powf(t, expD);
-        const int16_t x = xD + (int16_t)(t * dW);
-        // Interpolate from peakY toward sustY
-        const int16_t y = peakY + (int16_t)(shaped * (sustY - peakY));
-
-        const int16_t fy = min(y, baseY);
-        const int16_t fh = abs(y - baseY);
-        if (fh > 0) gfx_->drawFastVLine(x, fy, fh, fillCol);
-
-        gfx_->drawLine(prevX, prevDrawY, x, y, accentColour);
-        gfx_->drawLine(prevX, prevDrawY + 1, x, y + 1, accentColour);
-
-        prevX = x;
-        prevDrawY = y;
-    }
-
-    // --- SUSTAIN: flat line at sustain level ---
-    // Fill the sustain region as a rectangle (much faster than per-pixel vlines)
-    {
-        const int16_t fy = min(sustY, baseY);
-        const int16_t fh = abs(sustY - baseY);
-        if (fh > 0) gfx_->fillRect(xS, fy, sustW, fh, fillCol);
-
-        // Outline: 2px horizontal line
-        gfx_->drawFastHLine(xS, sustY, sustW, accentColour);
-        gfx_->drawFastHLine(xS, sustY + 1, sustW, accentColour);
-
-        prevX = xR;
-        prevDrawY = sustY;
-    }
-
-    // --- RELEASE: sustain level → baseline, shaped by release exponent ---
-    for (uint8_t i = 1; i <= PTS_PER_SEG; ++i) {
-        const float t = (float)i / PTS_PER_SEG;
-        const float shaped = powf(t, expR);
-        const int16_t x = xR + (int16_t)(t * rW);
-        // Interpolate from sustY toward baseY
-        const int16_t y = sustY + (int16_t)(shaped * (baseY - sustY));
-
-        const int16_t fy = min(y, baseY);
-        const int16_t fh = abs(y - baseY);
-        if (fh > 0) gfx_->drawFastVLine(x, fy, fh, fillCol);
-
-        gfx_->drawLine(prevX, prevDrawY, x, y, accentColour);
-        gfx_->drawLine(prevX, prevDrawY + 1, x, y + 1, accentColour);
-
-        prevX = x;
-        prevDrawY = y;
-    }
-
-    // ── Vertex dots on the curve ────────────────────────────────────────────
-    // Larger dots at the 5 ADSR vertices, accent-coloured.
-    // Origin and end are slightly smaller/dimmer (they're fixed points).
-    const uint16_t dimAccent = dimColour(accentColour, 1);
-
-    gfx_->fillCircle(xA,   baseY,  3, dimAccent);   // origin (always at baseline)
-    gfx_->fillCircle(xD,   peakY,  5, accentColour); // peak (end of attack)
-    gfx_->fillCircle(xS,   sustY,  5, accentColour); // sustain start (end of decay)
-    gfx_->fillCircle(xR,   sustY,  5, accentColour); // sustain end (start of release)
-    gfx_->fillCircle(xEnd, baseY,  3, dimAccent);    // release end (returns to baseline)
-
-    // ── Stage labels along the baseline ─────────────────────────────────────
-    gfx_->setTextColor(COL_GRID);
-    gfx_->setTextSize(1);
-
-    // Centre each label under its segment
-    auto printCentred = [&](uint16_t segX, uint16_t segW, const char* text) {
-        const uint16_t textW = strlen(text) * 6;  // 6px per char at size 1
-        gfx_->setCursor(segX + (segW - textW) / 2, botY + 4);
-        gfx_->print(text);
+            prevX = x;
+            prevY = y;
+        }
     };
 
-    printCentred(xA, aW,   "ATTACK");
-    printCentred(xD, dW,   "DECAY");
-    printCentred(xS, sustW, "SUSTAIN");
-    printCentred(xR, rW,   "RELEASE");
+    // ── Three back-to-back curve segments ───────────────────────────────────
+    drawSegment(xA, baseY, xD, peakY, expA);    // ATTACK
+    drawSegment(xD, peakY, xR, sustY, expD);    // DECAY (ends at sustain level)
+    drawSegment(xR, sustY, xEnd, baseY, expR);  // RELEASE (starts at sustain)
 
-    // ── Pitch depth label (PITCH sub-page only) ─────────────────────────────
+    // ── Vertex dots ─────────────────────────────────────────────────────────
+    // Four vertices total: origin, peak, sustain (single dot at D→R), end.
+    // Was five with the old flat-sustain geometry (start and end of hold).
+    const int16_t peakYc = constrain(peakY, (int16_t)topY, (int16_t)(botY - 1));
+    const int16_t sustYc = constrain(sustY, (int16_t)topY, (int16_t)(botY - 1));
+
+    gfx_->fillCircle(xA,   baseY,  3, dimAccent);    // origin
+    gfx_->fillCircle(xD,   peakYc, 5, accentColour); // peak (A→D vertex)
+    gfx_->fillCircle(xR,   sustYc, 5, accentColour); // sustain (D→R vertex)
+    gfx_->fillCircle(xEnd, baseY,  3, dimAccent);    // end
+
+    // ── Stage labels along the baseline ─────────────────────────────────────
+    // No SUSTAIN label any more (no time region). Labels are skipped if the
+    // segment is too narrow to fit the text — keeps the baseline tidy.
+    gfx_->setTextColor(COL_GRID);
+    gfx_->setTextSize(1);
+    auto printCentred = [&](int16_t segX, uint16_t segW_, const char* text) {
+        const uint16_t textW = strlen(text) * 6;  // 6 px per char at size 1
+        if (segW_ < textW + 4) return;
+        gfx_->setCursor(segX + (segW_ - textW) / 2, botY + 4);
+        gfx_->print(text);
+    };
+    printCentred(xA, aW, "ATTACK");
+    printCentred(xD, dW, "DECAY");
+    printCentred(xR, rW, "RELEASE");
+
+    // ── PITCH depth indicator (text only, size 2 for readability) ───────────
+    // Sits in the strip between header and curve top, out of the way of any
+    // curve drawing. Worst-case "DEPTH -63" = 9 chars × 12 px = 108 px wide.
     if (env.hasDepth) {
         gfx_->setTextColor(dimAccent);
-        gfx_->setTextSize(1);
-        gfx_->setCursor(drawR - 70, topY);
+        gfx_->setTextSize(2);
+        gfx_->setCursor(drawR - 110, PARAM_AREA_Y + 4);
         gfx_->print("DEPTH ");
-        if (env.depth > 0) gfx_->print("+");
+        if (env.depth > 0) gfx_->print('+');
         gfx_->print(env.depth);
+    }
+}
+
+// =============================================================================
+// SEQ page — read all params we depend on
+// =============================================================================
+// Pulls every CC the SEQ display reads from the cache so dirty-detection in
+// refreshSequencerPage() can compare snapshots cheaply.
+
+SeqParams DisplayRenderer::readSeqParams(const PageManager& pages) const {
+    SeqParams p = {};
+    p.enable    = pages.getCCValue(CC::SEQ_ENABLE);
+    p.steps     = pages.getCCValue(CC::SEQ_STEPS);
+    p.gate      = pages.getCCValue(CC::SEQ_GATE_LENGTH);
+    p.slide     = pages.getCCValue(CC::SEQ_SLIDE);
+    p.dir       = pages.getCCValue(CC::SEQ_DIRECTION);
+    p.dest      = pages.getCCValue(CC::SEQ_DESTINATION);
+    p.sync      = pages.getCCValue(CC::SEQ_TIMING_MODE);
+    p.rate      = pages.getCCValue(CC::SEQ_RATE);
+    p.depth     = (int8_t)pages.getCCValue(CC::SEQ_DEPTH) - 64;
+    p.retrigger = pages.getCCValue(CC::SEQ_RETRIGGER);
+    for (uint8_t i = 0; i < 16; ++i) p.values[i] = pages.getStepValue(i);
+    return p;
+}
+
+// =============================================================================
+// SEQ page — geometry helpers
+// =============================================================================
+// Slot bounds. Even spacing of SEQ_VISIBLE (=8) slots across the usable width
+// inside SEQ_PAD_X margins, separated by SEQ_SLOT_GAP pixels.
+
+void DisplayRenderer::seqSlotBounds(uint8_t slotIdx,
+                                    uint16_t& slotX, uint16_t& slotW) const {
+    const uint16_t drawW  = SCREEN_W - 2 * SEQ_PAD_X;
+    // (SEQ_VISIBLE - 1) gaps total, so slot width = (drawW - gaps) / SEQ_VISIBLE
+    slotW = (drawW - (SEQ_VISIBLE - 1) * SEQ_SLOT_GAP) / SEQ_VISIBLE;
+    slotX = SEQ_PAD_X + slotIdx * (slotW + SEQ_SLOT_GAP);
+}
+
+// Bar top y from step value (0..127 → top of bars area .. baseline).
+// 1 px headroom below the bars area top so the very tallest bars don't merge
+// with the bars-area top edge.
+
+int16_t DisplayRenderer::seqBarTopY(uint8_t value) const {
+    const uint16_t maxH = SEQ_BARS_H - 4;  // small top headroom
+    const uint16_t h    = (uint32_t)value * maxH / 127;
+    return (int16_t)(SEQ_BARS_Y + SEQ_BARS_H - h);
+}
+
+// =============================================================================
+// SEQ page — info row (DEST / DIR / SYNC / DEPTH / RTG)
+// =============================================================================
+// Single 22-px-tall strip at the top of the param area. Five fixed-x slots,
+// text size 1 so labels + values both fit. Repainted on its own when only
+// info-row params change.
+
+void DisplayRenderer::drawSeqInfoRow(const SeqParams& sp,
+                                     uint16_t accentColour) {
+    // Erase the row strip first (so this works as both initial paint and
+    // refresh — caller doesn't need a separate erase step).
+    gfx_->fillRect(0, SEQ_INFO_Y, SCREEN_W, SEQ_INFO_H, COL_BG);
+
+    const bool enabled = (sp.enable >= 64);
+    // ENABLE off dims the whole info row so the whole page reads "disabled".
+    const uint16_t textCol = enabled ? COL_TEXT : dimColour(COL_TEXT, 2);
+
+    gfx_->setTextColor(textCol);
+    gfx_->setTextSize(1);
+    const uint16_t y = SEQ_INFO_Y + 8;  // vertically centred-ish in 22 px row
+
+    // DEST — bucket-midpoint mapping matches the SELECT decoder elsewhere
+    const uint8_t destIdx = (uint32_t)sp.dest * kSeqDestCount / 128;
+    const char* destName  = (destIdx < kSeqDestCount)
+                            ? kSeqDestOptions[destIdx] : "?";
+    gfx_->setCursor(SEQ_PAD_X, y);
+    gfx_->print("DEST:");
+    gfx_->print(destName);
+
+    // DIR — arrow glyph from Adafruit GFX's CP437-style font:
+    //   0x1A = →   0x1B = ←   0x18 = ↑   0x19 = ↓
+    // Bounce and Random don't have single-glyph icons, so use short text.
+    const uint8_t dirIdx = (uint32_t)sp.dir * kSeqDirCount / 128;
+    gfx_->setCursor(SEQ_PAD_X + 110, y);
+    gfx_->print("DIR:");
+    switch (dirIdx) {
+        case 0: gfx_->write(0x1A);                  break;  // Fwd  →
+        case 1: gfx_->write(0x1B);                  break;  // Rev  ←
+        case 2: gfx_->print("<>");                  break;  // Bounce
+        case 3: gfx_->print("?");                   break;  // Random
+        default: gfx_->print(sp.dir);
+    }
+
+    // SYNC — name from the timing-mode options table
+    const uint8_t syncIdx = (uint32_t)sp.sync * kTimingModeCount / 128;
+    const char* syncName  = (syncIdx < kTimingModeCount)
+                            ? kTimingModeOptions[syncIdx] : "?";
+    gfx_->setCursor(SEQ_PAD_X + 180, y);
+    gfx_->print("SYNC:");
+    gfx_->print(syncName);
+
+    // DEPTH — signed
+    gfx_->setCursor(SEQ_PAD_X + 290, y);
+    gfx_->print("DEPTH:");
+    if (sp.depth > 0) gfx_->print('+');
+    gfx_->print(sp.depth);
+
+    // RTG (RETRIG) — ON / OFF
+    gfx_->setCursor(SEQ_PAD_X + 380, y);
+    gfx_->print("RTG:");
+    gfx_->print(sp.retrigger >= 64 ? "ON" : "OFF");
+}
+
+// =============================================================================
+// SEQ page — one bar (used by full draw + per-step partial redraw)
+// =============================================================================
+// Bar width = gate length (4..slotW). Bar height = step value (0..maxBarH).
+// Inactive steps (slotIdx + 1 > active count for this scene) render as a thin
+// dim outline at the baseline so the user still sees where the slot is.
+
+void DisplayRenderer::drawSeqBar(uint8_t slotIdx, uint8_t absStep,
+                                 const SeqParams& sp, uint16_t accentColour) {
+    uint16_t slotX, slotW;
+    seqSlotBounds(slotIdx, slotX, slotW);
+
+    // Decode active step count from SEQ_STEPS CC. The Teensy maps 0..127 to
+    // 1..16 with the same rule: activeCount = 1 + (cc * 15 / 127).
+    const uint8_t activeCount = 1 + ((uint32_t)sp.steps * 15 / 127);
+    const bool    isActive    = (absStep <= activeCount);
+    const bool    enabled     = (sp.enable >= 64);
+
+    // Bar width grows with SEQ_GATE_LENGTH. Min 4 px so even gate=0 leaves a
+    // visible sliver; max slotW so gate=127 fills the slot.
+    const uint16_t minW = 4;
+    const uint16_t barW = minW + (uint32_t)sp.gate * (slotW - minW) / 127;
+    const uint16_t barX = slotX + (slotW - barW) / 2;  // centred in slot
+
+    if (isActive && enabled) {
+        const int16_t  topY = seqBarTopY(sp.values[absStep - 1]);
+        const uint16_t h    = (uint16_t)(SEQ_BARS_Y + SEQ_BARS_H - topY);
+        if (h > 0) gfx_->fillRect(barX, topY, barW, h, accentColour);
+    } else {
+        // Inactive (or disabled) → dim outline at the slot baseline. Shows
+        // where the step would be without filling the slot vertically.
+        const uint16_t dim = dimColour(accentColour, 2);
+        gfx_->drawRect(barX, SEQ_BARS_Y + SEQ_BARS_H - 5, barW, 4, dim);
+    }
+}
+
+// =============================================================================
+// SEQ page — slide line between two adjacent bars
+// =============================================================================
+// Drawn only when sp.slide > 0 AND both endpoint steps are active. Passing
+// `colour` explicitly lets the same function paint (with the accent) and
+// erase (with COL_BG), used by the per-step partial-redraw path.
+
+void DisplayRenderer::drawSeqSlideLine(uint8_t fromSlotIdx, uint8_t toSlotIdx,
+                                       const SeqParams& sp, uint8_t baseStep,
+                                       uint16_t colour) {
+    if (sp.slide == 0) return;  // slide disabled
+
+    const uint8_t absFrom = baseStep + fromSlotIdx + 1;
+    const uint8_t absTo   = baseStep + toSlotIdx   + 1;
+    const uint8_t activeCount = 1 + ((uint32_t)sp.steps * 15 / 127);
+    if (absFrom > activeCount || absTo > activeCount) return;
+    if (sp.enable < 64) return;  // whole page dim when disabled — no slide line either
+
+    uint16_t fromX, fromW, toX, toW;
+    seqSlotBounds(fromSlotIdx, fromX, fromW);
+    seqSlotBounds(toSlotIdx,   toX,   toW);
+
+    const int16_t fromMidX = (int16_t)(fromX + fromW / 2);
+    const int16_t toMidX   = (int16_t)(toX   + toW   / 2);
+    const int16_t fromTopY = seqBarTopY(sp.values[absFrom - 1]);
+    const int16_t toTopY   = seqBarTopY(sp.values[absTo   - 1]);
+
+    gfx_->drawLine(fromMidX, fromTopY, toMidX, toTopY, colour);
+}
+
+// =============================================================================
+// SEQ page — whole bars area (8 bars + slide lines + step number labels)
+// =============================================================================
+// Used on full draw and as the fallback when global params change (gate/
+// slide-binary/active-step count/enable). Erases the bars area + label row
+// first so callers don't need to.
+
+void DisplayRenderer::drawSeqBarsArea(const SeqParams& sp, uint8_t baseStep,
+                                      uint16_t accentColour) {
+    // Erase bars area + step label row in one fillRect (single SPI window)
+    gfx_->fillRect(0, SEQ_BARS_Y, SCREEN_W,
+                   (SEQ_LABELS_Y + 12) - SEQ_BARS_Y, COL_BG);
+
+    // Bars — left to right
+    for (uint8_t slotIdx = 0; slotIdx < SEQ_VISIBLE; ++slotIdx) {
+        const uint8_t absStep = baseStep + slotIdx + 1;
+        drawSeqBar(slotIdx, absStep, sp, accentColour);
+    }
+
+    // Slide lines between adjacent active bars (skipped when slide==0)
+    if (sp.slide > 0 && sp.enable >= 64) {
+        const uint16_t slideCol = dimColour(accentColour, 1);
+        for (uint8_t i = 0; i < SEQ_VISIBLE - 1; ++i) {
+            drawSeqSlideLine(i, i + 1, sp, baseStep, slideCol);
+        }
+    }
+
+    // Step number labels (1..16 mapped to current scene)
+    const bool enabled = (sp.enable >= 64);
+    gfx_->setTextColor(enabled ? COL_LABEL : dimColour(COL_LABEL, 1));
+    gfx_->setTextSize(1);
+    for (uint8_t slotIdx = 0; slotIdx < SEQ_VISIBLE; ++slotIdx) {
+        const uint8_t  absStep = baseStep + slotIdx + 1;
+        uint16_t slotX, slotW;
+        seqSlotBounds(slotIdx, slotX, slotW);
+        const uint16_t labelX = slotX + slotW / 2 - (absStep >= 10 ? 6 : 3);
+        gfx_->setCursor(labelX, SEQ_LABELS_Y);
+        gfx_->print(absStep);
     }
 }
 
 // =============================================================================
 // SEQ page — full draw
 // =============================================================================
-// Draws 8 vertical bars representing step values, with a connecting line
-// through the bar tops for visual flow.  Step numbers shown at baseline.
+// Called on page/scene change. Paints info row + bars area + labels and
+// captures the current SeqParams as the dirty-detection baseline.
 
 void DisplayRenderer::drawSequencerPage(const PageManager& pages) {
     const uint16_t accent = toRgb565(pages.activeMapping().ledColour);
-    const uint8_t baseStep = (pages.potScene() == Scene::B) ? 8 : 0;
+    const uint8_t  baseStep = (pages.potScene() == Scene::B) ? 8 : 0;
 
-    // Draw all 8 bars
-    for (uint8_t i = 0; i < 8; ++i) {
-        const uint8_t val = pages.getStepValue(baseStep + i);
-        drawSequencerBar(i, val, accent, baseStep + i + 1);
-        prevValues_[i] = val;
-    }
-
-    // Connecting line through bar tops
-    const uint16_t padX     = 16;
-    const uint16_t padTop   = 20;
-    const uint16_t padBot   = 24;
-    const uint16_t drawW    = SCREEN_W - 2 * padX;
-    const uint16_t baselineY = PARAM_AREA_Y + PARAM_AREA_H - padBot;
-    const uint16_t maxBarH  = PARAM_AREA_H - padTop - padBot;
-    const uint16_t barGap   = 6;
-    const uint16_t barW     = (drawW - 7 * barGap) / 8;
-    const uint16_t dimAccent = dimColour(accent, 1);
-
-    int16_t prevTopX = 0, prevTopY = 0;
-    for (uint8_t i = 0; i < 8; ++i) {
-        const uint8_t val = pages.getStepValue(baseStep + i);
-        const uint16_t barX = padX + i * (barW + barGap);
-        const uint16_t barH = (uint32_t)val * maxBarH / 127;
-        const int16_t topX = (int16_t)(barX + barW / 2);
-        const int16_t topY = (int16_t)(baselineY - barH);
-
-        if (i > 0) {
-            gfx_->drawLine(prevTopX, prevTopY, topX, topY, dimAccent);
-            gfx_->drawLine(prevTopX, prevTopY + 1, topX, topY + 1, dimAccent);
-        }
-        prevTopX = topX;
-        prevTopY = topY;
-    }
-
-    // Baseline
-    gfx_->drawFastHLine(padX, baselineY, drawW, COL_GRID);
+    prevSeq_ = readSeqParams(pages);
+    drawSeqInfoRow(prevSeq_, accent);
+    drawSeqBarsArea(prevSeq_, baseStep, accent);
 }
 
 // =============================================================================
 // SEQ page — differential refresh
 // =============================================================================
+// Three independent dirty regions:
+//   - Info row    (dest/dir/sync/rate/depth/retrigger)  → repaint info row
+//   - Bars area   (enable/steps/gate/slide-binary)      → repaint bars area
+//   - Step values (per-step value change)               → per-bar partial
+// More than one can be dirty in a single refresh; each is updated only if
+// needed. enable-changed forces both info and bars repaint because both
+// dim/un-dim together.
 
 void DisplayRenderer::refreshSequencerPage(const PageManager& pages) {
-    const uint8_t baseStep = (pages.potScene() == Scene::B) ? 8 : 0;
-    bool anyChanged = false;
+    const SeqParams now = readSeqParams(pages);
+    if (now == prevSeq_) return;
 
-    for (uint8_t i = 0; i < 8; ++i) {
-        const uint8_t val = pages.getStepValue(baseStep + i);
-        if (val != prevValues_[i]) {
-            anyChanged = true;
-            break;
+    const uint16_t accent   = toRgb565(pages.activeMapping().ledColour);
+    const uint8_t  baseStep = (pages.potScene() == Scene::B) ? 8 : 0;
+
+    // Categorise
+    const bool enableChanged = (now.enable    != prevSeq_.enable);
+    const bool infoChanged   = enableChanged
+                            || (now.dest      != prevSeq_.dest)
+                            || (now.dir       != prevSeq_.dir)
+                            || (now.sync      != prevSeq_.sync)
+                            || (now.rate      != prevSeq_.rate)
+                            || (now.depth     != prevSeq_.depth)
+                            || (now.retrigger != prevSeq_.retrigger);
+
+    // "Slide binary" — show vs hide. Same line colour for any non-zero value,
+    // so within-non-zero changes don't need a repaint.
+    const bool slideBinaryChanged = ((now.slide == 0) != (prevSeq_.slide == 0));
+    const bool barsGeomChanged    = enableChanged
+                                 || (now.steps != prevSeq_.steps)
+                                 || (now.gate  != prevSeq_.gate)
+                                 || slideBinaryChanged;
+
+    // Per-step value changes — only check the currently-visible scene's 8
+    // steps. Off-scene changes are tracked but not painted (scene switch
+    // forces a full redraw anyway).
+    uint8_t stepChangeCount = 0;
+    uint8_t lastChangedSlot = 0xFF;
+    for (uint8_t i = 0; i < SEQ_VISIBLE; ++i) {
+        if (now.values[baseStep + i] != prevSeq_.values[baseStep + i]) {
+            stepChangeCount++;
+            lastChangedSlot = i;
         }
     }
-    if (!anyChanged) return;
 
-    // Erase param area and redraw (connecting line means full redraw)
-    const uint16_t accent = toRgb565(pages.activeMapping().ledColour);
-    gfx_->fillRect(0, PARAM_AREA_Y, SCREEN_W, PARAM_AREA_H, COL_BG);
-    drawSequencerPage(pages);
-}
+    // ── Repaint info row if needed ──────────────────────────────────────────
+    if (infoChanged) drawSeqInfoRow(now, accent);
 
-// =============================================================================
-// SEQ page — single bar
-// =============================================================================
-// Draws one rounded vertical bar + step number label.
+    // ── Repaint bars area if globals changed (overrides per-step partial) ──
+    if (barsGeomChanged) {
+        drawSeqBarsArea(now, baseStep, accent);
+    } else if (stepChangeCount == 1) {
+        // Single bar moved — cheapest path. Erase just that slot's column +
+        // the slide-line segments either side of it, then repaint bar + lines.
+        const uint8_t slotIdx = lastChangedSlot;
+        uint16_t slotX, slotW;
+        seqSlotBounds(slotIdx, slotX, slotW);
 
-void DisplayRenderer::drawSequencerBar(uint8_t idx, uint8_t value,
-                                       uint16_t accent, uint8_t stepNum) {
-    const uint16_t padX     = 16;
-    const uint16_t padTop   = 20;
-    const uint16_t padBot   = 24;
-    const uint16_t drawW    = SCREEN_W - 2 * padX;
-    const uint16_t baselineY = PARAM_AREA_Y + PARAM_AREA_H - padBot;
-    const uint16_t maxBarH  = PARAM_AREA_H - padTop - padBot;
-    const uint16_t barGap   = 6;
-    const uint16_t barW     = (drawW - 7 * barGap) / 8;
-    const uint16_t barX     = padX + idx * (barW + barGap);
-    const uint16_t barH     = (uint32_t)value * maxBarH / 127;
-    const uint16_t barY     = baselineY - barH;
+        // Erase old slide line segments to/from this bar (using prevSeq_ to
+        // know where they were) so the OLD line pixels don't linger.
+        if (prevSeq_.slide > 0 && prevSeq_.enable >= 64) {
+            if (slotIdx > 0) {
+                drawSeqSlideLine(slotIdx - 1, slotIdx, prevSeq_, baseStep, COL_BG);
+            }
+            if (slotIdx + 1 < SEQ_VISIBLE) {
+                drawSeqSlideLine(slotIdx, slotIdx + 1, prevSeq_, baseStep, COL_BG);
+            }
+        }
 
-    // Filled bar with rounded top (radius 3px)
-    if (barH > 6) {
-        gfx_->fillRoundRect(barX, barY, barW, barH, 3, accent);
-    } else if (barH > 0) {
-        gfx_->fillRect(barX, barY, barW, barH, accent);
+        // Erase the slot column (bar + step-label area)
+        gfx_->fillRect(slotX, SEQ_BARS_Y, slotW,
+                       (SEQ_LABELS_Y + 12) - SEQ_BARS_Y, COL_BG);
+
+        // Redraw bar
+        drawSeqBar(slotIdx, baseStep + slotIdx + 1, now, accent);
+
+        // Redraw new slide lines on either side
+        if (now.slide > 0 && now.enable >= 64) {
+            const uint16_t slideCol = dimColour(accent, 1);
+            if (slotIdx > 0) {
+                drawSeqSlideLine(slotIdx - 1, slotIdx, now, baseStep, slideCol);
+            }
+            if (slotIdx + 1 < SEQ_VISIBLE) {
+                drawSeqSlideLine(slotIdx, slotIdx + 1, now, baseStep, slideCol);
+            }
+        }
+
+        // Repaint step number label (was erased with the slot column)
+        const bool enabled = (now.enable >= 64);
+        gfx_->setTextColor(enabled ? COL_LABEL : dimColour(COL_LABEL, 1));
+        gfx_->setTextSize(1);
+        const uint8_t  absStep = baseStep + slotIdx + 1;
+        const uint16_t labelX  = slotX + slotW / 2 - (absStep >= 10 ? 6 : 3);
+        gfx_->setCursor(labelX, SEQ_LABELS_Y);
+        gfx_->print(absStep);
+
+    } else if (stepChangeCount > 1) {
+        // Multiple step values changed (typically a patch load) — single full
+        // bars-area repaint is cheaper than N per-bar redraws.
+        drawSeqBarsArea(now, baseStep, accent);
     }
 
-    // Thin outline for empty bars (shows slot position even at value 0)
-    if (barH == 0) {
-        gfx_->drawRoundRect(barX, baselineY - 4, barW, 4, 1,
-                            dimColour(accent, 2));
-    }
-
-    // Step number label below baseline
-    gfx_->setTextColor(COL_LABEL);
-    gfx_->setTextSize(1);
-    const uint16_t labelX = barX + (barW / 2) - (stepNum >= 10 ? 6 : 3);
-    gfx_->setCursor(labelX, baselineY + 6);
-    gfx_->print(stepNum);
+    prevSeq_ = now;
 }
 
 // =============================================================================

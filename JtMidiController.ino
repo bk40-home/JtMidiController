@@ -60,6 +60,9 @@
 // Patches
 #include "PatchStore.h"
 
+// Performance monitor
+#include "PerfMonitor.h"
+
 // ── Global instances ────────────────────────────────────────────────────────
 
 static Angle8Unit      angle;
@@ -122,6 +125,9 @@ void setup() {
     // the bus works). Core 3.x logs every NACK at ERROR level; core 2.x
     // didn't, which is why the demo appeared clean.
     esp_log_level_set("i2c.master", ESP_LOG_NONE);
+
+
+    PerfMonitor::begin();
 
     Serial.println("\n========================================");
     Serial.println("  JT-8000 Hardware Controller");
@@ -222,6 +228,8 @@ void setup() {
 void loop() {
     const uint32_t now = millis();
 
+    PerfMonitor::loopBegin();           // ← add as first line
+
     // ── 1. Poll all hardware (every loop) ───────────────────────────────
     angle.poll();
     encoder.poll();
@@ -303,4 +311,5 @@ void loop() {
         Serial.printf("[PAGE] %s sub=%u\n",
                       pages.activeMapping().tab, pages.currentSubPage());
     }
-}
+    PerfMonitor::loopEnd();             // ← add as last line
+    }

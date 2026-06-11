@@ -87,6 +87,10 @@ static constexpr bool     POT_SLEEP_ENABLE  = true;
 // Pickup threshold: how close the pot must be to the target CC before it
 // "picks up" and starts sending. In CC units (0..127). 2 = tight, 5 = loose.
 static constexpr uint8_t  PICKUP_THRESHOLD  = 3;
+// Snap on decisive move: when seeking, if the pot moves ≥ this many CC units
+// away from its reading at seek-start, bypass pickup and snap to the pot's
+// current value. 0 = disabled (pure pickup behaviour).
+static constexpr uint8_t  PICKUP_SNAP_CC      = 8;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // MIDI channel — default channel for outgoing CC/notes to Teensy
@@ -99,6 +103,10 @@ static constexpr uint8_t  MIDI_CHANNEL      = 1;
 // LittleFS partition on ESP32 flash. Patches stored as binary blobs.
 static constexpr uint8_t  MAX_PATCHES       = 128;
 static constexpr uint16_t CC_STATE_SIZE     = 160;   // match Teensy ccState[] size
+
+static constexpr uint32_t PERF_REPORT_MS    = 2000;  // perf+heap report cadence
+
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Feature flags — compile-time enable/disable
