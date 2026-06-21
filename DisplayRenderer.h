@@ -161,6 +161,12 @@ private:
     // Tracks whatever is displayed in each cell (pot or encoder value)
     uint8_t prevValues_[8] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
 
+    // Tracks the filter engine state used on the last normal-page refresh.
+    // When the engine flips (CC 113), the shared filter CCs (112/114/111)
+    // change label + type + options even if their own values don't, so the
+    // whole param area must be repainted.  0xFF = "unknown" forces first paint.
+    uint8_t prevEngineIsVA_ = 0xFF;
+
     // ── ENV page cache — full parameter snapshot for dirty detection ─────────
     EnvParams prevEnv_ = {};
 
@@ -241,7 +247,8 @@ private:
     // so the static label doesn't flicker on every value change.
     void drawParamCell(uint8_t col, uint8_t row, const ControlSlot& slot,
                        uint8_t value, bool seeking, uint16_t accentColour,
-                       bool isEncoder = false, bool labelStays = false);
+                       bool isEncoder = false, bool labelStays = false,
+                       bool engineIsVA = false);
 
     // ── ENV page rendering ──────────────────────────────────────────────────
     EnvParams readEnvParams(const PageManager& pages) const;

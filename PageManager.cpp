@@ -229,13 +229,34 @@ void PageManager::applyEncoderDelta(const ControlSlot& slot, int32_t delta) {
             break;
 
         case CtrlType::SELECT: {
-            // Select: wrap around. Each detent = one option step.
-            // We don't know the option count here, so wrap at 0..127.
-            // The Teensy side uses bucket decoding to map CC to option index.
-            int val = (int)current + (int)delta;
-            if (val < 0)   val = 127;
-            if (val > 127) val = 0;
-            newVal = (uint8_t)val;
+            // Select: step by whole options and emit the bucket MIDPOINT for
+            // the new option, so the value round-trips through the Teensy's
+            // `value * optionCount / 128` decode (and clears hard thresholds
+            // like the engine's >= 64 test).  Previously this stepped the raw
+            // CC by ±1, which for a 2-option select never reached 64 → the VA
+            // engine could not be selected.
+            const ParamDef* pd = ParamDefs::findByCC(slot.cc);
+            const uint8_t count = (pd && pd->optionCount > 0) ? pd->optionCount : 0;
+
+            if (count == 0) {
+                // Unknown option count — fall back to legacy raw wrap.
+                int val = (int)current + (int)delta;
+                if (val < 0)   val = 127;
+                if (val > 127) val = 0;
+                newVal = (uint8_t)val;
+                break;
+            }
+
+            // Current option index from the same decode the Teensy uses.
+            int idx = (int)current * (int)count / 128;
+            if (idx >= (int)count) idx = (int)count - 1;
+
+            // Advance by delta options, wrapping within [0, count).
+            idx = (idx + (int)delta) % (int)count;
+            if (idx < 0) idx += (int)count;
+
+            // Bucket midpoint for this option: (idx*128 + 64) / count.
+            newVal = (uint8_t)clamp7((idx * 128 + 64) / (int)count);
             break;
         }
 

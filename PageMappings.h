@@ -174,7 +174,9 @@ static const PageMapping kFltCoreMapping = {
       S("KEY TRK",  CC::FILTER_KEY_TRACK,  BIPOLAR),
       S("ENGINE",   CC::FILTER_ENGINE,     SELECT),
       S("MODE",     CC::FILTER_MODE,       SELECT),
-      S("VA TYPE",  CC::VA_FILTER_TYPE,    SELECT),
+      N,  /* was VA TYPE (CC 115) - retired; CC 112/MODE now shows VA type
+             contextually when the VA engine is active (DisplayRenderer
+             resolveContext). Slot left empty to keep the 8-slot layout. */
       S("OCT CTRL", CC::FILTER_OCTAVE_CONTROL, CONT) },
     { N, N, N, N, N, N, N, N },
     // encsA — sub-page selectors only

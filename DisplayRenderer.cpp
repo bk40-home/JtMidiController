@@ -112,19 +112,27 @@ void DisplayRenderer::drawPage(const PageManager& pages) {
             // Pot cell — standard rendering
             const uint8_t val = pages.getCCValue(pots[i].cc);
             const bool seeking = pages.pickup().isSeeking(i);
-            drawParamCell(col, row, pots[i], val, seeking, accent, false);
+            drawParamCell(col, row, pots[i], val, seeking, accent, false,
+                          /*labelStays=*/false,
+                          pages.getCCValue(CC::FILTER_ENGINE) >= 64);
             prevValues_[i] = val;
         } else if (nextEnc < encCount) {
             // Empty pot slot — fill with next available encoder value
             const ControlSlot& enc = encs[encQueue[nextEnc++]];
             const uint8_t val = pages.getCCValue(enc.cc);
-            drawParamCell(col, row, enc, val, false, accent, true);
+            drawParamCell(col, row, enc, val, false, accent, true,
+                          /*labelStays=*/false,
+                          pages.getCCValue(CC::FILTER_ENGINE) >= 64);
             prevValues_[i] = val;
         } else {
             // Truly empty — leave blank
             prevValues_[i] = 0xFF;
         }
     }
+
+    // Capture the engine state this full paint was drawn with, so the next
+    // refreshValues() doesn't immediately think the engine flipped.
+    prevEngineIsVA_ = (pages.getCCValue(CC::FILTER_ENGINE) >= 64) ? 1 : 0;
 }
 
 // =============================================================================
@@ -150,6 +158,17 @@ void DisplayRenderer::refreshValues(const PageManager& pages) {
     // Normal pages: rebuild cell layout (same logic as drawPage) and
     // redraw only cells whose CC value changed since last frame.
     const auto& map = pages.activeMapping();
+
+    // Engine flip (CC 113) changes the shared filter CCs' label/type/options
+    // without necessarily changing their own value, so a value-only refresh
+    // would leave them stale.  Detect the flip and force a full repaint.
+    const uint8_t engNow = (pages.getCCValue(CC::FILTER_ENGINE) >= 64) ? 1 : 0;
+    if (engNow != prevEngineIsVA_) {
+        prevEngineIsVA_ = engNow;
+        drawPage(pages);   // full paint redraws labels + values for every cell
+        return;
+    }
+
     const uint16_t accent = toRgb565(map.ledColour);
     const ControlSlot* pots = (pages.potScene() == Scene::A)
                               ? map.potsA : map.potsB;
@@ -189,7 +208,8 @@ void DisplayRenderer::refreshValues(const PageManager& pages) {
             // text and bar gauge are erased + redrawn. Eliminates the brief
             // label flicker that happened on every value change.
             drawParamCell(i % 4, i / 4, *slot, val, seeking, accent, isEnc,
-                          /*labelStays=*/true);
+                          /*labelStays=*/true,
+                          pages.getCCValue(CC::FILTER_ENGINE) >= 64);
         }
     }
 }
@@ -270,11 +290,78 @@ void DisplayRenderer::drawFooter(const PageManager& pages) {
 // SELECT / TOGGLE types show only the value text (no gauge — discrete values
 // don't benefit from a position indicator).
 
+// =============================================================================
+// Engine-context resolver for the three shared filter CCs
+// =============================================================================
+// One CC, two meanings depending on the active filter engine.  This returns
+// the effective label / draw-type / option-array for a slot, so the label and
+// the value text can never disagree (they come from one place).  Non-shared
+// CCs, or OBXa mode, fall through to the slot/ParamDef defaults.
+//
+//   CC 112 : OBXa "MODE" (SELECT) | VA "VA TYPE" (SELECT, kVAFilterOptions)
+//   CC 114 : OBXa "XP MODE"(SELECT)| VA "DRIVE"  (CONT, 0..1)
+//   CC 111 : OBXa "MULTI" (CONT)  | VA "SAT"     (SELECT, kSaturationOptions)
+//
+// Only the VA branch overrides; OBXa keeps whatever the page slot declared.
+namespace {
+struct ResolvedSlot {
+    const char*        label;
+    CtrlType           type;
+    const char* const* options;
+    uint8_t            optionCount;
+};
+
+ResolvedSlot resolveContext(const ControlSlot& slot, bool engineIsVA)
+{
+    // Default: slot's own label/type, options looked up by CC (SELECT only).
+    const ParamDef* pd = ParamDefs::findByCC(slot.cc);
+    ResolvedSlot r{
+        slot.label,
+        slot.type,
+        pd ? pd->options     : nullptr,
+        pd ? pd->optionCount : (uint8_t)0
+    };
+
+    if (!engineIsVA) return r;   // OBXa → defaults
+
+    switch (slot.cc) {
+        case CC::FILTER_MODE:            // 112 → VA Filter Type
+            r.label       = "VA TYPE";
+            r.type        = CtrlType::SELECT;
+            r.options     = kVAFilterOptions;
+            r.optionCount = kVAFilterCount;
+            break;
+        case CC::FILTER_OBXA_XPANDER_MODE: // 114 → VA Drive (continuous)
+            r.label       = "DRIVE";
+            r.type        = CtrlType::CONT;
+            r.options     = nullptr;
+            r.optionCount = 0;
+            break;
+        case CC::FILTER_OBXA_MULTIMODE:  // 111 → VA Saturation
+            r.label       = "SAT";
+            r.type        = CtrlType::SELECT;
+            r.options     = kSaturationOptions;
+            r.optionCount = kSaturationCount;
+            break;
+        default:
+            break;   // not a shared CC — keep defaults
+    }
+    return r;
+}
+} // namespace
+
 void DisplayRenderer::drawParamCell(uint8_t col, uint8_t row,
                                     const ControlSlot& slot,
                                     uint8_t value, bool seeking,
                                     uint16_t accentColour,
-                                    bool isEncoder, bool labelStays) {
+                                    bool isEncoder, bool labelStays,
+                                    bool engineIsVA) {
+    // Resolve engine-context: shared filter CCs (112/114/111) take their VA
+    // meaning when the VA engine is active.  effLabel/effType/effOptions are
+    // used everywhere below in place of the slot's raw label/type so the label
+    // and value text always agree.
+    const ResolvedSlot eff = resolveContext(slot, engineIsVA);
+
     const uint16_t x = col * CELL_W;
     const uint16_t y = PARAM_AREA_Y + row * CELL_H;
 
@@ -300,32 +387,31 @@ void DisplayRenderer::drawParamCell(uint8_t col, uint8_t row,
         gfx_->setTextColor(lblCol);
         gfx_->setTextSize(1);
         gfx_->setCursor(x + 4, y + 4);
-        gfx_->print(slot.label);
+        gfx_->print(eff.label);
     }
 
     // Value display — varies by type
     gfx_->setTextColor(valCol);
 
-    const bool showBar = (slot.type == CtrlType::CONT
-                       || slot.type == CtrlType::ENV
-                       || slot.type == CtrlType::BIPOLAR);
+    const bool showBar = (eff.type == CtrlType::CONT
+                       || eff.type == CtrlType::ENV
+                       || eff.type == CtrlType::BIPOLAR);
 
-    if (slot.type == CtrlType::TOGGLE) {
+    if (eff.type == CtrlType::TOGGLE) {
         // Large centred ON/OFF — no gauge
         gfx_->setTextSize(3);
         gfx_->setCursor(x + 4, y + CELL_H / 2 - 8);
         gfx_->print(value > 63 ? "ON" : "OFF");
 
-    } else if (slot.type == CtrlType::SELECT) {
-        // Look up option text from ParamDefs bucket tables.
-        // Converts CC value → bucket index → option name string.
-        const ParamDef* pd = ParamDefs::findByCC(slot.cc);
-        if (pd && pd->optionCount > 0 && pd->options) {
-            uint8_t idx = (uint32_t)value * pd->optionCount / 128;
-            if (idx >= pd->optionCount) idx = pd->optionCount - 1;
+    } else if (eff.type == CtrlType::SELECT) {
+        // Option text from the resolved array (engine-context aware), so the
+        // value text always matches the resolved label.
+        if (eff.optionCount > 0 && eff.options) {
+            uint8_t idx = (uint32_t)value * eff.optionCount / 128;
+            if (idx >= eff.optionCount) idx = eff.optionCount - 1;
             gfx_->setTextSize(2);
             gfx_->setCursor(x + 4, y + CELL_H / 2 - 6);
-            gfx_->print(pd->options[idx]);
+            gfx_->print(eff.options[idx]);
         } else {
             // Fallback — no option table found, show raw number
             gfx_->setTextSize(3);
@@ -333,7 +419,7 @@ void DisplayRenderer::drawParamCell(uint8_t col, uint8_t row,
             gfx_->print(value);
         }
 
-    } else if (slot.type == CtrlType::BIPOLAR) {
+    } else if (eff.type == CtrlType::BIPOLAR) {
         gfx_->setTextSize(3);
         gfx_->setCursor(x + 4, y + 20);
         const int8_t centred = (int8_t)value - 64;
@@ -357,7 +443,7 @@ void DisplayRenderer::drawParamCell(uint8_t col, uint8_t row,
         // Background track
         gfx_->fillRoundRect(barX, barY, barW, barH, 3, COL_HEADER);
 
-        if (slot.type == CtrlType::BIPOLAR) {
+        if (eff.type == CtrlType::BIPOLAR) {
             // Centre tick
             const uint16_t midY = barY + barH / 2;
             gfx_->drawFastHLine(barX - 2, midY, barW + 4, COL_GRID);

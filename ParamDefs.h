@@ -90,6 +90,13 @@ static constexpr const char* kVAFilterOptions[] = {
 };
 static constexpr uint8_t kVAFilterCount = 13;
 
+// VA output saturation — mirrors Teensy ParamDefs / VASaturationType order
+// (None / Fast / Tanh).  Shared CC 111 when the VA engine is active.
+static constexpr const char* kSaturationOptions[] = {
+    "OFF", "SOFT", "WARM"
+};
+static constexpr uint8_t kSaturationCount = 3;
+
 // Xpander sub-modes (0–14)
 static constexpr const char* kXpanderModeOptions[] = {
     "0", "1", "2", "3", "4", "5", "6", "7",
