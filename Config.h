@@ -68,7 +68,7 @@ static constexpr uint8_t  ADDR_BYTEBTN  = 0x47;
 // I2C polling runs every loop for low latency. These gates control display
 // refresh, serial debug, and LED update rates.
 static constexpr uint32_t DISPLAY_FRAME_MS  = 33;   // ~30 fps display refresh
-static constexpr uint32_t SERIAL_DEBUG_MS   = 1000;  // debug print cadence
+static constexpr uint32_t SERIAL_DEBUG_MS   = 10000;  // debug print cadence
 static constexpr uint32_t LED_UPDATE_MS     = 200;   // LED refresh (~5 Hz, was 20ms)
 // LED writes at 50kHz I2C take ~2ms each × 25 LEDs = 50ms per update.
 // At 20ms interval, the bus was permanently saturated with LED writes,
@@ -103,6 +103,20 @@ static constexpr uint8_t  MIDI_CHANNEL      = 1;
 // LittleFS partition on ESP32 flash. Patches stored as binary blobs.
 static constexpr uint8_t  MAX_PATCHES       = 128;
 static constexpr uint16_t CC_STATE_SIZE     = 160;   // match Teensy ccState[] size
+// Patch Manager browse list — how many slots are visible on screen at once.
+// Scrolling moves a window over the full MAX_PATCHES range.
+static constexpr uint8_t  PTCH_VISIBLE_ROWS = 5;
+// How long a "SAVE" confirmation stays armed before auto-cancelling.
+static constexpr uint32_t PTCH_SAVE_ARM_MS  = 3000;
+// How long a LOAD/SAVE result banner stays on screen.
+static constexpr uint32_t PTCH_BANNER_MS    = 1500;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ByteButton long-press — opens the Patch Manager page from any page button.
+// Held below this threshold still performs the normal short-press page
+// switch; crossing it suppresses that and opens PTCH instead.
+// ─────────────────────────────────────────────────────────────────────────────
+static constexpr uint32_t LONG_PRESS_MS     = 1000;
 
 static constexpr uint32_t PERF_REPORT_MS    = 2000;  // perf+heap report cadence
 

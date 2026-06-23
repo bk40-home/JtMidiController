@@ -1,21 +1,38 @@
 // =============================================================================
 // PatchStore.cpp
 // =============================================================================
+// Uses FFat (FAT filesystem), not LittleFS. The board's recommended partition
+// scheme ("16M Flash (3MB APP/9.9MB FATFS)" / app3M_fat9M_16MB) builds its
+// data partition with subtype "fat" (visible in the boot diagnostic as
+// `ffat : ... type: DATA, subtype: FAT`), not "spiffs". LittleFS.begin()
+// specifically searches for a spiffs-subtype partition and fails with
+// "Error: 261" (partition not found) on this board — confirmed by a verbose
+// esp_littlefs trace showing zero esp_littlefs: lines, meaning the failure
+// happens before that driver is ever reached.
+//
+// FFat is the Arduino-ESP32 core's own filesystem library for fat-subtype
+// partitions (esp_partition_find_first(..., ESP_PARTITION_SUBTYPE_DATA_FAT,
+// ...) — see FFat.cpp) and defaults to the exact partition label ("ffat")
+// this board's scheme already provides, so no partition table change is
+// needed. FFat shares the same fs::FS / File base classes as LittleFS, so
+// every call below (open/exists/mkdir/remove, File::write/read/close/
+// available/readStringUntil/println) is identical to before — only the
+// filesystem object name changed.
 #include "PatchStore.h"
-#include <LittleFS.h>
+#include <FFat.h>
 
 static const char* kPatchDir  = "/patches";
 static const char* kIndexFile = "/patches/index.txt";
 
 bool PatchStore::begin() {
-    if (!LittleFS.begin(true)) {  // true = format on first use
-        Serial.println("[PATCH] LittleFS mount failed");
+    if (!FFat.begin(true)) {  // true = format on first use
+        Serial.println("[PATCH] FFat mount failed");
         return false;
     }
 
     // Create /patches directory if it doesn't exist
-    if (!LittleFS.exists(kPatchDir)) {
-        LittleFS.mkdir(kPatchDir);
+    if (!FFat.exists(kPatchDir)) {
+        FFat.mkdir(kPatchDir);
     }
 
     // Initialise names to empty
@@ -33,7 +50,7 @@ bool PatchStore::save(uint8_t slot, const uint8_t* ccState, const char* name) {
     char path[32];
     slotPath(slot, path, sizeof(path));
 
-    File f = LittleFS.open(path, "w");
+    File f = FFat.open(path, "w");
     if (!f) {
         Serial.printf("[PATCH] Failed to open %s for writing\n", path);
         return false;
@@ -66,7 +83,7 @@ bool PatchStore::load(uint8_t slot, uint8_t* ccState) {
     char path[32];
     slotPath(slot, path, sizeof(path));
 
-    File f = LittleFS.open(path, "r");
+    File f = FFat.open(path, "r");
     if (!f) return false;
 
     const size_t bytesRead = f.read(ccState, Config::CC_STATE_SIZE);
@@ -87,7 +104,7 @@ bool PatchStore::exists(uint8_t slot) const {
     if (!mounted_ || slot >= Config::MAX_PATCHES) return false;
     char path[32];
     slotPath(slot, path, sizeof(path));
-    return LittleFS.exists(path);
+    return FFat.exists(path);
 }
 
 const char* PatchStore::getName(uint8_t slot) const {
@@ -107,8 +124,8 @@ bool PatchStore::remove(uint8_t slot) {
     if (!mounted_ || slot >= Config::MAX_PATCHES) return false;
     char path[32];
     slotPath(slot, path, sizeof(path));
-    if (LittleFS.exists(path)) {
-        LittleFS.remove(path);
+    if (FFat.exists(path)) {
+        FFat.remove(path);
     }
     names_[slot][0] = '\0';
     saveIndex();
@@ -131,9 +148,9 @@ void PatchStore::slotPath(uint8_t slot, char* buf, size_t bufLen) {
 }
 
 void PatchStore::loadIndex() {
-    if (!LittleFS.exists(kIndexFile)) return;
+    if (!FFat.exists(kIndexFile)) return;
 
-    File f = LittleFS.open(kIndexFile, "r");
+    File f = FFat.open(kIndexFile, "r");
     if (!f) return;
 
     uint8_t slot = 0;
@@ -150,7 +167,7 @@ void PatchStore::loadIndex() {
 }
 
 void PatchStore::saveIndex() {
-    File f = LittleFS.open(kIndexFile, "w");
+    File f = FFat.open(kIndexFile, "w");
     if (!f) return;
 
     for (uint8_t i = 0; i < Config::MAX_PATCHES; ++i) {

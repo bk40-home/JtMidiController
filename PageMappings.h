@@ -174,9 +174,7 @@ static const PageMapping kFltCoreMapping = {
       S("KEY TRK",  CC::FILTER_KEY_TRACK,  BIPOLAR),
       S("ENGINE",   CC::FILTER_ENGINE,     SELECT),
       S("MODE",     CC::FILTER_MODE,       SELECT),
-      N,  /* was VA TYPE (CC 115) - retired; CC 112/MODE now shows VA type
-             contextually when the VA engine is active (DisplayRenderer
-             resolveContext). Slot left empty to keep the 8-slot layout. */
+      S("VA TYPE",  CC::VA_FILTER_TYPE,    SELECT),
       S("OCT CTRL", CC::FILTER_OCTAVE_CONTROL, CONT) },
     { N, N, N, N, N, N, N, N },
     // encsA — sub-page selectors only
@@ -464,6 +462,49 @@ static const PageMapping kPerfMapping = {
 };
 
 // =============================================================================
+// PTCH — Patch Manager (long-press ANY ByteButton to open, from any page)
+// =============================================================================
+// No pots used — potsA/potsB are intentionally all N. The four actions live
+// on dedicated encoders rather than one multi-mode encoder, matching the
+// existing PERF-style "one control, one job" convention used elsewhere in
+// this file:
+//
+//   encsA[0]  SCROLL  — rotate only, moves the highlighted slot up/down the
+//                        browse list. Push is a no-op (PatchManager ignores
+//                        isPush==true for this encoder index).
+//   encsA[1]  LOAD    — push loads the highlighted slot. Non-destructive,
+//                        so no confirmation step. Rotation ignored.
+//   encsA[2]  SAVE    — push arms a save; a second push within
+//                        Config::PTCH_SAVE_ARM_MS commits it. Destructive,
+//                        so it always requires the explicit two-step
+//                        confirm per the project's standing rule on
+//                        confirming before changing stored data. Rotation
+//                        ignored.
+//   encsA[3]  IMPORT  — push opens the SYX import picker. STUBBED this
+//                        pass — PatchManager shows a "COMING SOON" banner
+//                        instead of importing. Rotation ignored.
+//
+// DisplayRenderer never reads slot.cc for ACTION types (there's nothing to
+// show as a CC value) — it routes PTCH through its own drawPatchPage(),
+// same pattern as the ENV/SEQ custom pages.
+// =============================================================================
+static const PageMapping kPtchMapping = {
+    "PATCH MANAGER", "PTCH", PageColour::PC_SLATE,
+    // potsA — unused
+    { N, N, N, N, N, N, N, N },
+    // potsB — unused
+    { N, N, N, N, N, N, N, N },
+    // encsA — the four PTCH actions
+    { S("SCROLL", 0, ACTION),
+      S("LOAD",   0, ACTION),
+      S("SAVE",   0, ACTION),
+      S("IMPORT", 0, ACTION),
+      N, N, N, N },
+    // encsB — unused (no scene-B variant for PTCH)
+    { N, N, N, N, N, N, N, N }
+};
+
+// =============================================================================
 // Lookup helpers — PageManager uses these to get the active mapping
 // =============================================================================
 
@@ -491,6 +532,7 @@ inline const PageMapping& getFlatMapping(PageID page) {
         case PageID::MIX:  return kMixMapping;
         case PageID::SEQ:  return kSeqMapping;
         case PageID::PERF: return kPerfMapping;
+        case PageID::PTCH: return kPtchMapping;
         default:           return kHomeMapping;
     }
 }

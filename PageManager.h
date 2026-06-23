@@ -32,6 +32,12 @@
 // Callback for sending a CC out (to MIDI router)
 using SendCCCallback = void(*)(uint8_t cc, uint8_t value);
 
+// Callback for ACTION-type encoder slots (Patch Manager scroll/load/save/
+// import). encIdx identifies which encoder fired (0..7) so one callback
+// can dispatch all four PTCH actions; isPush distinguishes a button push
+// from a rotation, and delta carries the rotation amount (0 for a push).
+using ActionCallback = void(*)(uint8_t encIdx, bool isPush, int32_t delta);
+
 class PageManager {
 public:
     PageManager() = default;
@@ -45,6 +51,9 @@ public:
 
     // ── MIDI output callback ────────────────────────────────────────────────
     void setSendCC(SendCCCallback cb) { sendCC_ = cb; }
+
+    // ── ACTION encoder callback (Patch Manager) ─────────────────────────────
+    void setActionCallback(ActionCallback cb) { actionCB_ = cb; }
 
     // ── Incoming CC from Teensy ─────────────────────────────────────────────
     // Updates local CC cache and pickup targets. Called by UartMidi callback.
@@ -65,6 +74,31 @@ public:
 
     // ── Pickup state access (for display) ───────────────────────────────────
     const PickupMode& pickup() const { return pickup_; }
+
+    // ── Patch Manager support ───────────────────────────────────────────────
+    // Read-only access to the full CC cache, for PatchStore::save().
+    const uint8_t* ccStateRaw()  const { return ccState_; }
+    uint16_t       ccStateSize() const { return Config::CC_STATE_SIZE; }
+
+    // Bulk-write the CC cache from a loaded patch WITHOUT sending MIDI.
+    // Used after PatchStore::load() so the display reflects the new patch
+    // instantly; the caller is responsible for relaying the same values to
+    // the Teensy via sendCC_ separately (see PatchManager::loadSlot()).
+    //
+    // IMPORTANT: src must be a full Config::CC_STATE_SIZE buffer indexed by
+    // raw CC number — i.e. exactly the shape PatchStore::load() fills in.
+    // This is NOT indexed by PatchSchema::kPatchableCCs position. Only the
+    // entries whose CC number appears in kPatchableCCs are copied into the
+    // cache; everything else in src is ignored (PatchStore's file format
+    // stores the full 160-byte array, but only the patchable subset is
+    // meaningful — the rest is padding from however the slot was last
+    // written).
+    void bulkLoadCC(const uint8_t* src, uint16_t size);
+
+    // Open the Patch Manager page directly (called by the long-press
+    // handler in handlePageButtons). Public so a future dedicated control
+    // could also reach it without duplicating the page-switch logic.
+    void openPatchManager();
 
 private:
     PageID       page_     = PageID::HOME;
@@ -89,6 +123,11 @@ private:
 
     // CC output callback
     SendCCCallback sendCC_ = nullptr;
+
+    // ACTION encoder callback (Patch Manager) — nullptr until PatchManager
+    // registers itself in setup(). handleEncoders() no-ops ACTION slots if
+    // this isn't set, so PTCH is harmless even before wiring is complete.
+    ActionCallback actionCB_ = nullptr;
 
     // ── Internal handlers ───────────────────────────────────────────────────
     void handlePageButtons(ByteButtonUnit& buttons);

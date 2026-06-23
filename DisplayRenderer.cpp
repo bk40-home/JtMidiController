@@ -83,6 +83,20 @@ void DisplayRenderer::drawPage(const PageManager& pages) {
         return;
     }
 
+    // PTCH (Patch Manager) is drawn entirely by the PatchManager-aware
+    // overload below. If this plain overload is called while PTCH is
+    // active (e.g. a call site that hasn't been updated to pass a
+    // PatchManager — shouldn't happen post-wiring, but safer than drawing
+    // a blank param grid), fall back to a minimal placeholder rather than
+    // silently rendering nothing useful.
+    if (pages.currentPage() == PageID::PTCH) {
+        gfx_->setTextColor(COL_LABEL);
+        gfx_->setTextSize(1);
+        gfx_->setCursor(8, PARAM_AREA_Y + 8);
+        gfx_->print("Patch Manager unavailable — call drawPage(pages, patches)");
+        return;
+    }
+
     const auto& map = pages.activeMapping();
     const uint16_t accent = toRgb565(map.ledColour);
 
@@ -112,27 +126,39 @@ void DisplayRenderer::drawPage(const PageManager& pages) {
             // Pot cell — standard rendering
             const uint8_t val = pages.getCCValue(pots[i].cc);
             const bool seeking = pages.pickup().isSeeking(i);
-            drawParamCell(col, row, pots[i], val, seeking, accent, false,
-                          /*labelStays=*/false,
-                          pages.getCCValue(CC::FILTER_ENGINE) >= 64);
+            drawParamCell(col, row, pots[i], val, seeking, accent, false);
             prevValues_[i] = val;
         } else if (nextEnc < encCount) {
             // Empty pot slot — fill with next available encoder value
             const ControlSlot& enc = encs[encQueue[nextEnc++]];
             const uint8_t val = pages.getCCValue(enc.cc);
-            drawParamCell(col, row, enc, val, false, accent, true,
-                          /*labelStays=*/false,
-                          pages.getCCValue(CC::FILTER_ENGINE) >= 64);
+            drawParamCell(col, row, enc, val, false, accent, true);
             prevValues_[i] = val;
         } else {
             // Truly empty — leave blank
             prevValues_[i] = 0xFF;
         }
     }
+}
 
-    // Capture the engine state this full paint was drawn with, so the next
-    // refreshValues() doesn't immediately think the engine flipped.
-    prevEngineIsVA_ = (pages.getCCValue(CC::FILTER_ENGINE) >= 64) ? 1 : 0;
+// =============================================================================
+// Full page redraw — PatchManager-aware overload
+// =============================================================================
+// Identical to the plain overload for every page except PTCH, where it
+// routes to drawPatchPage() instead of falling back to the placeholder
+// text. This is the version the .ino should call from now on.
+
+void DisplayRenderer::drawPage(const PageManager& pages,
+                               const PatchManager& patches) {
+    if (pages.currentPage() == PageID::PTCH) {
+        if (!ready_) return;
+        gfx_->fillScreen(COL_BG);
+        drawHeader(pages);
+        drawFooter(pages);
+        drawPatchPage(patches);
+        return;
+    }
+    drawPage(pages);
 }
 
 // =============================================================================
@@ -155,20 +181,16 @@ void DisplayRenderer::refreshValues(const PageManager& pages) {
         return;
     }
 
+    // PTCH has no CC-driven cells — ACTION slots all carry cc=0, so letting
+    // this fall through to the generic cell loop below would spuriously
+    // treat every ACTION encoder as "CC 0 changed" the first time CC 0's
+    // cached value differs from prevValues_[i]'s sentinel. Bail out; the
+    // PatchManager-aware overload is what actually drives this page.
+    if (pages.currentPage() == PageID::PTCH) return;
+
     // Normal pages: rebuild cell layout (same logic as drawPage) and
     // redraw only cells whose CC value changed since last frame.
     const auto& map = pages.activeMapping();
-
-    // Engine flip (CC 113) changes the shared filter CCs' label/type/options
-    // without necessarily changing their own value, so a value-only refresh
-    // would leave them stale.  Detect the flip and force a full repaint.
-    const uint8_t engNow = (pages.getCCValue(CC::FILTER_ENGINE) >= 64) ? 1 : 0;
-    if (engNow != prevEngineIsVA_) {
-        prevEngineIsVA_ = engNow;
-        drawPage(pages);   // full paint redraws labels + values for every cell
-        return;
-    }
-
     const uint16_t accent = toRgb565(map.ledColour);
     const ControlSlot* pots = (pages.potScene() == Scene::A)
                               ? map.potsA : map.potsB;
@@ -208,10 +230,25 @@ void DisplayRenderer::refreshValues(const PageManager& pages) {
             // text and bar gauge are erased + redrawn. Eliminates the brief
             // label flicker that happened on every value change.
             drawParamCell(i % 4, i / 4, *slot, val, seeking, accent, isEnc,
-                          /*labelStays=*/true,
-                          pages.getCCValue(CC::FILTER_ENGINE) >= 64);
+                          /*labelStays=*/true);
         }
     }
+}
+
+// =============================================================================
+// Lightweight value refresh — PatchManager-aware overload
+// =============================================================================
+// Identical to the plain overload for every page except PTCH, where it
+// routes to refreshPatchPage() instead of bailing out with no redraw.
+
+void DisplayRenderer::refreshValues(const PageManager& pages,
+                                    const PatchManager& patches) {
+    if (pages.currentPage() == PageID::PTCH) {
+        if (!ready_) return;
+        refreshPatchPage(patches);
+        return;
+    }
+    refreshValues(pages);
 }
 
 // =============================================================================
@@ -290,78 +327,11 @@ void DisplayRenderer::drawFooter(const PageManager& pages) {
 // SELECT / TOGGLE types show only the value text (no gauge — discrete values
 // don't benefit from a position indicator).
 
-// =============================================================================
-// Engine-context resolver for the three shared filter CCs
-// =============================================================================
-// One CC, two meanings depending on the active filter engine.  This returns
-// the effective label / draw-type / option-array for a slot, so the label and
-// the value text can never disagree (they come from one place).  Non-shared
-// CCs, or OBXa mode, fall through to the slot/ParamDef defaults.
-//
-//   CC 112 : OBXa "MODE" (SELECT) | VA "VA TYPE" (SELECT, kVAFilterOptions)
-//   CC 114 : OBXa "XP MODE"(SELECT)| VA "DRIVE"  (CONT, 0..1)
-//   CC 111 : OBXa "MULTI" (CONT)  | VA "SAT"     (SELECT, kSaturationOptions)
-//
-// Only the VA branch overrides; OBXa keeps whatever the page slot declared.
-namespace {
-struct ResolvedSlot {
-    const char*        label;
-    CtrlType           type;
-    const char* const* options;
-    uint8_t            optionCount;
-};
-
-ResolvedSlot resolveContext(const ControlSlot& slot, bool engineIsVA)
-{
-    // Default: slot's own label/type, options looked up by CC (SELECT only).
-    const ParamDef* pd = ParamDefs::findByCC(slot.cc);
-    ResolvedSlot r{
-        slot.label,
-        slot.type,
-        pd ? pd->options     : nullptr,
-        pd ? pd->optionCount : (uint8_t)0
-    };
-
-    if (!engineIsVA) return r;   // OBXa → defaults
-
-    switch (slot.cc) {
-        case CC::FILTER_MODE:            // 112 → VA Filter Type
-            r.label       = "VA TYPE";
-            r.type        = CtrlType::SELECT;
-            r.options     = kVAFilterOptions;
-            r.optionCount = kVAFilterCount;
-            break;
-        case CC::FILTER_OBXA_XPANDER_MODE: // 114 → VA Drive (continuous)
-            r.label       = "DRIVE";
-            r.type        = CtrlType::CONT;
-            r.options     = nullptr;
-            r.optionCount = 0;
-            break;
-        case CC::FILTER_OBXA_MULTIMODE:  // 111 → VA Saturation
-            r.label       = "SAT";
-            r.type        = CtrlType::SELECT;
-            r.options     = kSaturationOptions;
-            r.optionCount = kSaturationCount;
-            break;
-        default:
-            break;   // not a shared CC — keep defaults
-    }
-    return r;
-}
-} // namespace
-
 void DisplayRenderer::drawParamCell(uint8_t col, uint8_t row,
                                     const ControlSlot& slot,
                                     uint8_t value, bool seeking,
                                     uint16_t accentColour,
-                                    bool isEncoder, bool labelStays,
-                                    bool engineIsVA) {
-    // Resolve engine-context: shared filter CCs (112/114/111) take their VA
-    // meaning when the VA engine is active.  effLabel/effType/effOptions are
-    // used everywhere below in place of the slot's raw label/type so the label
-    // and value text always agree.
-    const ResolvedSlot eff = resolveContext(slot, engineIsVA);
-
+                                    bool isEncoder, bool labelStays) {
     const uint16_t x = col * CELL_W;
     const uint16_t y = PARAM_AREA_Y + row * CELL_H;
 
@@ -387,31 +357,32 @@ void DisplayRenderer::drawParamCell(uint8_t col, uint8_t row,
         gfx_->setTextColor(lblCol);
         gfx_->setTextSize(1);
         gfx_->setCursor(x + 4, y + 4);
-        gfx_->print(eff.label);
+        gfx_->print(slot.label);
     }
 
     // Value display — varies by type
     gfx_->setTextColor(valCol);
 
-    const bool showBar = (eff.type == CtrlType::CONT
-                       || eff.type == CtrlType::ENV
-                       || eff.type == CtrlType::BIPOLAR);
+    const bool showBar = (slot.type == CtrlType::CONT
+                       || slot.type == CtrlType::ENV
+                       || slot.type == CtrlType::BIPOLAR);
 
-    if (eff.type == CtrlType::TOGGLE) {
+    if (slot.type == CtrlType::TOGGLE) {
         // Large centred ON/OFF — no gauge
         gfx_->setTextSize(3);
         gfx_->setCursor(x + 4, y + CELL_H / 2 - 8);
         gfx_->print(value > 63 ? "ON" : "OFF");
 
-    } else if (eff.type == CtrlType::SELECT) {
-        // Option text from the resolved array (engine-context aware), so the
-        // value text always matches the resolved label.
-        if (eff.optionCount > 0 && eff.options) {
-            uint8_t idx = (uint32_t)value * eff.optionCount / 128;
-            if (idx >= eff.optionCount) idx = eff.optionCount - 1;
+    } else if (slot.type == CtrlType::SELECT) {
+        // Look up option text from ParamDefs bucket tables.
+        // Converts CC value → bucket index → option name string.
+        const ParamDef* pd = ParamDefs::findByCC(slot.cc);
+        if (pd && pd->optionCount > 0 && pd->options) {
+            uint8_t idx = (uint32_t)value * pd->optionCount / 128;
+            if (idx >= pd->optionCount) idx = pd->optionCount - 1;
             gfx_->setTextSize(2);
             gfx_->setCursor(x + 4, y + CELL_H / 2 - 6);
-            gfx_->print(eff.options[idx]);
+            gfx_->print(pd->options[idx]);
         } else {
             // Fallback — no option table found, show raw number
             gfx_->setTextSize(3);
@@ -419,7 +390,7 @@ void DisplayRenderer::drawParamCell(uint8_t col, uint8_t row,
             gfx_->print(value);
         }
 
-    } else if (eff.type == CtrlType::BIPOLAR) {
+    } else if (slot.type == CtrlType::BIPOLAR) {
         gfx_->setTextSize(3);
         gfx_->setCursor(x + 4, y + 20);
         const int8_t centred = (int8_t)value - 64;
@@ -443,7 +414,7 @@ void DisplayRenderer::drawParamCell(uint8_t col, uint8_t row,
         // Background track
         gfx_->fillRoundRect(barX, barY, barW, barH, 3, COL_HEADER);
 
-        if (eff.type == CtrlType::BIPOLAR) {
+        if (slot.type == CtrlType::BIPOLAR) {
             // Centre tick
             const uint16_t midY = barY + barH / 2;
             gfx_->drawFastHLine(barX - 2, midY, barW + 4, COL_GRID);
@@ -1285,4 +1256,140 @@ float DisplayRenderer::ccToExponent(uint8_t cc) {
     }
     // 65..127 → 1.0..5.0 (exponential range)
     return 1.0f + ((cc - 64) * (4.0f / 63.0f));
+}
+
+// =============================================================================
+// PTCH page — Patch Manager browse list + banner
+// =============================================================================
+// No CC values, no pots, no sub-pages. Drawing is just:
+//   1. Config::PTCH_VISIBLE_ROWS rows, each "SLOT NNN  Name" (or empty)
+//   2. A banner strip overlaid at the bottom when PatchManager has an
+//      active message (LOADED / SAVED / SAVE_ARMED / etc.)
+//
+// The visible window always centres on the highlighted slot where possible,
+// clamping at the top/bottom of the 0..MAX_PATCHES-1 range so partial rows
+// never need to be drawn.
+
+void DisplayRenderer::drawPatchPage(const PatchManager& patches) {
+    if (!ready_) return;
+
+    const uint8_t highlight = patches.highlightedSlot();
+
+    // Centre the window on the highlighted slot, clamped to valid range.
+    // Integer-only math — no float needed for a window this small.
+    int16_t windowStart = static_cast<int16_t>(highlight)
+                         - (Config::PTCH_VISIBLE_ROWS / 2);
+    if (windowStart < 0) windowStart = 0;
+    const int16_t maxStart = static_cast<int16_t>(Config::MAX_PATCHES)
+                            - Config::PTCH_VISIBLE_ROWS;
+    if (windowStart > maxStart) windowStart = (maxStart > 0) ? maxStart : 0;
+
+    for (uint8_t row = 0; row < Config::PTCH_VISIBLE_ROWS; ++row) {
+        const uint8_t slot = static_cast<uint8_t>(windowStart + row);
+        drawPtchRow(patches, row, slot, slot == highlight);
+    }
+
+    prevPtchHighlight_ = highlight;
+    prevPtchBanner_    = PtchBannerType::NONE;  // force first refresh to draw it
+
+    drawPtchBanner(patches);
+}
+
+void DisplayRenderer::refreshPatchPage(const PatchManager& patches) {
+    if (!ready_) return;
+
+    const uint8_t highlight = patches.highlightedSlot();
+
+    // Highlight moved — full row repaint is simplest and still cheap (5
+    // rows × one fillRect + two prints each, well within the 33 ms frame
+    // budget). A more surgical erase/redraw of just the two affected rows
+    // would save a handful of SPI calls but isn't worth the bookkeeping
+    // for a 5-row list that redraws at most a few times a second.
+    if (highlight != prevPtchHighlight_) {
+        drawPatchPage(patches);
+        return;
+    }
+
+    // Highlight unchanged — only the banner might need updating.
+    if (patches.bannerType() != prevPtchBanner_) {
+        if (patches.bannerType() == PtchBannerType::NONE) {
+            erasePtchBanner(patches);
+        } else {
+            drawPtchBanner(patches);
+        }
+        prevPtchBanner_ = patches.bannerType();
+    }
+}
+
+void DisplayRenderer::drawPtchRow(const PatchManager& patches,
+                                  uint8_t rowIdx, uint8_t slot,
+                                  bool highlighted) {
+    const uint16_t y = PTCH_ROW_Y + rowIdx * PTCH_ROW_H;
+
+    gfx_->fillRect(0, y, SCREEN_W, PTCH_ROW_H, COL_BG);
+
+    if (highlighted) {
+        gfx_->fillRoundRect(PTCH_PAD_X - 4, y + 2, SCREEN_W - 2 * (PTCH_PAD_X - 4),
+                            PTCH_ROW_H - 4, 4, COL_ENC_BG);
+    }
+
+    const uint16_t textCol = highlighted ? COL_ACCENT : COL_TEXT;
+    gfx_->setTextColor(textCol);
+    gfx_->setTextSize(1);
+    gfx_->setCursor(PTCH_PAD_X, y + (PTCH_ROW_H / 2) - 4);
+
+    // nullptr from slotName() is PatchStore's documented contract for an
+    // empty/unset slot (see PatchStore::getName()'s header comment).
+    char line[40];
+    const char* name = patches.slotName(slot);
+
+    if (name) {
+        snprintf(line, sizeof(line), "SLOT %03u  %s", slot, name);
+    } else {
+        snprintf(line, sizeof(line), "SLOT %03u  -- empty --", slot);
+    }
+    gfx_->print(line);
+}
+
+void DisplayRenderer::drawPtchBanner(const PatchManager& patches) {
+    gfx_->fillRect(0, PTCH_BANNER_Y, SCREEN_W, PTCH_BANNER_H, COL_HEADER);
+
+    char text[48];
+    const uint8_t slot = patches.bannerSlot();
+
+    switch (patches.bannerType()) {
+        case PtchBannerType::LOADED:
+            snprintf(text, sizeof(text), "LOADED: %s", patches.loadedName());
+            break;
+        case PtchBannerType::SAVED:
+            snprintf(text, sizeof(text), "SAVED - SLOT %03u", slot);
+            break;
+        case PtchBannerType::SAVE_ARMED:
+            snprintf(text, sizeof(text), "SAVE SLOT %03u? PUSH AGAIN", slot);
+            break;
+        case PtchBannerType::SAVE_CANCELLED:
+            snprintf(text, sizeof(text), "SAVE CANCELLED");
+            break;
+        case PtchBannerType::SAVE_FAILED:
+            snprintf(text, sizeof(text), "SAVE FAILED - SEE SERIAL LOG");
+            break;
+        case PtchBannerType::EMPTY_SLOT:
+            snprintf(text, sizeof(text), "SLOT %03u EMPTY - NOTHING TO LOAD", slot);
+            break;
+        case PtchBannerType::COMING_SOON:
+            snprintf(text, sizeof(text), "SYX IMPORT - COMING SOON");
+            break;
+        case PtchBannerType::NONE:
+        default:
+            return;  // nothing to draw
+    }
+
+    gfx_->setTextColor(COL_ACCENT);
+    gfx_->setTextSize(1);
+    gfx_->setCursor(PTCH_PAD_X, PTCH_BANNER_Y + (PTCH_BANNER_H / 2) - 4);
+    gfx_->print(text);
+}
+
+void DisplayRenderer::erasePtchBanner(const PatchManager& /*patches*/) {
+    gfx_->fillRect(0, PTCH_BANNER_Y, SCREEN_W, PTCH_BANNER_H, COL_BG);
 }

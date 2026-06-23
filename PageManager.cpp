@@ -74,15 +74,43 @@ void PageManager::onReceiveCC(uint8_t cc, uint8_t value) {
 // ── Page navigation ─────────────────────────────────────────────────────────
 
 void PageManager::handlePageButtons(ByteButtonUnit& buttons) {
+    // ── Long-press pass (any button) ────────────────────────────────────────
+    // Checked FIRST, across every button, before any short-press logic runs.
+    // This is the only way to reach PTCH — there's no dedicated button index
+    // for it, by design (see PageDefs.h PageID::PTCH comment).
+    for (uint8_t i = 0; i < ByteButtonUnit::kNumButtons; ++i) {
+        if (!buttons.longPressed(i)) continue;
+        buttons.clearLongPress(i);
+
+        // A long-press always also has a pending short-press latched from
+        // the same rising edge (ByteButtonUnit doesn't know in advance how
+        // long a hold will last). Consume it here WITHOUT acting on it —
+        // otherwise releasing after a long-press would also fire a page
+        // switch on whichever button was held.
+        buttons.clearPress(i);
+
+        if (page_ != PageID::PTCH) {
+            openPatchManager();
+            Serial.printf("[PAGE] Long-press btn %u -> PTCH\n", i);
+        }
+        // If already in PTCH, a second long-press is a no-op — short-press
+        // is the documented close gesture, consistent with every other page.
+        return;  // one page action per poll cycle, same as the short-press loop below
+    }
+
+    // ── Short-press pass ─────────────────────────────────────────────────────
     for (uint8_t i = 0; i < ByteButtonUnit::kNumButtons; ++i) {
         if (!buttons.pressed(i)) continue;
         buttons.clearPress(i);
 
-        // ByteSwitch buttons 0..7 map to pages 1..8 (OSC..PERF)
+        // ByteSwitch buttons 0..7 map to pages 1..8 (OSC..PERF). PTCH (9) is
+        // intentionally unreachable here — long-press only, handled above.
         const PageID target = static_cast<PageID>(i + 1);
 
-        if (page_ == target) {
-            // Second press on same button → close, return to HOME
+        if (page_ == target || page_ == PageID::PTCH) {
+            // Second press on same button, OR any short-press while PTCH is
+            // open, closes back to HOME — same re-press-to-close convention
+            // used by every other page.
             page_    = PageID::HOME;
             subPage_ = 0;
         } else {
@@ -96,7 +124,27 @@ void PageManager::handlePageButtons(ByteButtonUnit& buttons) {
 
         Serial.printf("[PAGE] → %s (sub %u)\n",
                       activeMapping().tab, subPage_);
+
+        // One page action per poll cycle. REQUIRED here (unlike the
+        // original pre-PTCH version of this loop, which had no early exit
+        // but was harmless since page_ == target could only match the one
+        // button for the currently active page): page_ == PageID::PTCH is
+        // true for EVERY button index while PTCH is open, so without this
+        // return, a second pending press in the same poll cycle could
+        // chain PTCH-close and the next page-open together invisibly in
+        // one call — e.g. two quick taps registering in the same poll
+        // would close PTCH AND immediately open the second button's page,
+        // looking like a single transition with no PTCH screen ever shown.
+        return;
     }
+}
+
+void PageManager::openPatchManager() {
+    page_    = PageID::PTCH;
+    subPage_ = 0;
+    // PTCH has no pots, so pickup targets are irrelevant, but refreshing
+    // keeps state consistent if the user backs out without scrolling.
+    refreshPickupTargets();
 }
 
 // ── Scene switch handling ───────────────────────────────────────────────────
@@ -173,6 +221,10 @@ void PageManager::handleEncoders(Encoder8Unit& encoder) {
             if (slot.isSubSel()) {
                 // Sub-page selector: switch sub-page
                 handleSubPageSelect(i);
+            } else if (slot.type == CtrlType::ACTION) {
+                // Patch Manager command (LOAD/SAVE/IMPORT push). No CC,
+                // no local cache update — entirely PatchManager's concern.
+                if (actionCB_) actionCB_(i, /*isPush=*/true, /*delta=*/0);
             } else if (slot.type == CtrlType::TOGGLE) {
                 // Toggle: flip between 0 and 127
                 const uint8_t current = getCCValue(slot.cc);
@@ -188,7 +240,12 @@ void PageManager::handleEncoders(Encoder8Unit& encoder) {
 
         // ── Rotation handling ───────────────────────────────────────────
         const int32_t d = encoder.delta(i);
-        if (d != 0 && slot.isActive()) {
+        if (d != 0 && slot.type == CtrlType::ACTION) {
+            // Patch Manager scroll. Routed directly — never touches CC
+            // dispatch or applyEncoderDelta's 0..127 clamping, since this
+            // is a list index, not a parameter value.
+            if (actionCB_) actionCB_(i, /*isPush=*/false, d);
+        } else if (d != 0 && slot.isActive()) {
             applyEncoderDelta(slot, d);
         }
     }
@@ -229,34 +286,13 @@ void PageManager::applyEncoderDelta(const ControlSlot& slot, int32_t delta) {
             break;
 
         case CtrlType::SELECT: {
-            // Select: step by whole options and emit the bucket MIDPOINT for
-            // the new option, so the value round-trips through the Teensy's
-            // `value * optionCount / 128` decode (and clears hard thresholds
-            // like the engine's >= 64 test).  Previously this stepped the raw
-            // CC by ±1, which for a 2-option select never reached 64 → the VA
-            // engine could not be selected.
-            const ParamDef* pd = ParamDefs::findByCC(slot.cc);
-            const uint8_t count = (pd && pd->optionCount > 0) ? pd->optionCount : 0;
-
-            if (count == 0) {
-                // Unknown option count — fall back to legacy raw wrap.
-                int val = (int)current + (int)delta;
-                if (val < 0)   val = 127;
-                if (val > 127) val = 0;
-                newVal = (uint8_t)val;
-                break;
-            }
-
-            // Current option index from the same decode the Teensy uses.
-            int idx = (int)current * (int)count / 128;
-            if (idx >= (int)count) idx = (int)count - 1;
-
-            // Advance by delta options, wrapping within [0, count).
-            idx = (idx + (int)delta) % (int)count;
-            if (idx < 0) idx += (int)count;
-
-            // Bucket midpoint for this option: (idx*128 + 64) / count.
-            newVal = (uint8_t)clamp7((idx * 128 + 64) / (int)count);
+            // Select: wrap around. Each detent = one option step.
+            // We don't know the option count here, so wrap at 0..127.
+            // The Teensy side uses bucket decoding to map CC to option index.
+            int val = (int)current + (int)delta;
+            if (val < 0)   val = 127;
+            if (val > 127) val = 0;
+            newVal = (uint8_t)val;
             break;
         }
 
@@ -325,4 +361,31 @@ uint8_t PageManager::clamp7(int value) {
     if (value < 0)   return 0;
     if (value > 127) return 127;
     return (uint8_t)value;
+}
+
+// ── Patch Manager support ───────────────────────────────────────────────────
+
+void PageManager::bulkLoadCC(const uint8_t* src, uint16_t size) {
+    // Defensive: src must be the full CC-indexed buffer PatchStore::load()
+    // produces. A mismatched size means the caller passed something else
+    // (e.g. a packed kPatchableCCs-sized array by mistake) — bail rather
+    // than read out of bounds or silently load garbage.
+    if (size != Config::CC_STATE_SIZE) return;
+
+    // Only copy the CCs that are actually patchable. The stored file is a
+    // full 160-byte dump, but most of that range is unused padding — we
+    // don't want to overwrite ccState_ entries for non-patchable CCs
+    // (there shouldn't be meaningful data there, but staying scoped to
+    // the schema is the safer contract regardless of what's in the file).
+    for (int i = 0; i < PatchSchema::kPatchableCount; ++i) {
+        const uint8_t cc = PatchSchema::kPatchableCCs[i];
+        if (cc < Config::CC_STATE_SIZE) {
+            ccState_[cc] = src[cc];
+        }
+    }
+
+    // The currently-displayed page may have pots whose pickup target just
+    // changed underneath it (e.g. loading a patch while OSC is open).
+    // Refreshing here avoids a stale pickup window on the next pot touch.
+    refreshPickupTargets();
 }

@@ -59,6 +59,7 @@
 
 // Patches
 #include "PatchStore.h"
+#include "PatchManager.h"
 
 // Performance monitor
 #include "PerfMonitor.h"
@@ -77,6 +78,7 @@ static PageManager     pages;
 static LedManager      leds;
 static DisplayRenderer display;
 static PatchStore      patchStore;
+static PatchManager    patchManager;
 
 // ── Timing gates ────────────────────────────────────────────────────────────
 static uint32_t lastDisplayMs = 0;
@@ -202,11 +204,18 @@ void setup() {
     // ── 7. PageManager + LEDs ───────────────────────────────────────────
     pages.begin();
     pages.setSendCC(onSendCC);
+    pages.setActionCallback(PatchManager::onAction);
     leds.begin(angle, encoder, buttons);
+
+    // PatchManager wires PatchStore + PageManager + the CC send callback.
+    // Must come after pages.begin() (needs a constructed PageManager to
+    // hold a reference to) and after patchStore.begin() (needs LittleFS
+    // already mounted so the slot-0 name lookup in begin() is valid).
+    patchManager.begin(patchStore, pages, onSendCC);
 
     // ── 8. Initial display ──────────────────────────────────────────────
     if (display.isReady()) {
-        display.drawPage(pages);
+        display.drawPage(pages, patchManager);
     }
 
     // ── 9. Request CC dump from Teensy ──────────────────────────────────
@@ -253,6 +262,13 @@ void loop() {
     // ── 3. Update PageManager (every loop) ──────────────────────────────
     pages.update(angle, encoder, buttons);
 
+    // ── 3b. Update Patch Manager (every loop, cheap when PTCH isn't open) ─
+    // Only does real work (banner timeout / save-arm timeout checks) —
+    // the actual scroll/load/save/import actions arrive via the
+    // ActionCallback registered above, fired synchronously from inside
+    // pages.update() when an ACTION-type encoder moves or is pushed.
+    patchManager.update();
+
     // ── 4. Update LEDs (rate-limited) ──────────────────────────────────
     if (now - lastLedMs >= Config::LED_UPDATE_MS) {
         lastLedMs = now;
@@ -269,13 +285,13 @@ void loop() {
                 pages.currentSubPage() != prevSubPage ||
                 pages.potScene() != prevPotScene) {
 
-                display.drawPage(pages);
+                display.drawPage(pages, patchManager);
                 prevPage     = pages.currentPage();
                 prevSubPage  = pages.currentSubPage();
                 prevPotScene = pages.potScene();
             } else {
                 // Lightweight refresh — only redraws cells whose value changed
-                display.refreshValues(pages);
+                display.refreshValues(pages, patchManager);
             }
         }
     }

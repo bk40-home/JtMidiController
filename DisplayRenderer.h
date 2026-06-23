@@ -70,6 +70,7 @@
 #include "Config.h"
 #include "TCA9554.h"
 #include "PageManager.h"
+#include "PatchManager.h"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // EnvParams — snapshot of all CC values needed to draw one ADSR curve.
@@ -140,9 +141,20 @@ public:
     // Detects ENV pages and routes to the curve renderer automatically.
     void drawPage(const PageManager& pages);
 
+    // PTCH-aware overload. Call this one instead of the above whenever a
+    // PatchManager instance is available (i.e. always, from the .ino) —
+    // it falls through to the plain overload for every page except PTCH,
+    // so there's no behaviour change for OSC/MIX/FLT/etc. Kept as a
+    // separate overload rather than changing drawPage's signature so
+    // nothing else in the codebase needs updating.
+    void drawPage(const PageManager& pages, const PatchManager& patches);
+
     // Lightweight value refresh — redraws only what changed since last frame.
     // Normal pages: individual cells.  ENV pages: full curve if any CC moved.
     void refreshValues(const PageManager& pages);
+
+    // PTCH-aware overload — see drawPage(pages, patches) above for rationale.
+    void refreshValues(const PageManager& pages, const PatchManager& patches);
 
     // Update header info (voice count, preset name, etc.)
     void updateHeader(const PageManager& pages);
@@ -161,12 +173,6 @@ private:
     // Tracks whatever is displayed in each cell (pot or encoder value)
     uint8_t prevValues_[8] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
 
-    // Tracks the filter engine state used on the last normal-page refresh.
-    // When the engine flips (CC 113), the shared filter CCs (112/114/111)
-    // change label + type + options even if their own values don't, so the
-    // whole param area must be repainted.  0xFF = "unknown" forces first paint.
-    uint8_t prevEngineIsVA_ = 0xFF;
-
     // ── ENV page cache — full parameter snapshot for dirty detection ─────────
     EnvParams prevEnv_ = {};
 
@@ -174,6 +180,10 @@ private:
     // Also tracks the scene the cache was captured under, so a scene switch
     // forces a full redraw (handled at the higher level via drawPage).
     SeqParams prevSeq_ = {};
+
+    // ── PTCH page cache — last drawn state for dirty detection ──────────────
+    uint8_t        prevPtchHighlight_ = 0xFF;  // 0xFF = "never drawn"
+    PtchBannerType prevPtchBanner_    = PtchBannerType::NONE;
 
     // ── Layout constants ────────────────────────────────────────────────────
     static constexpr uint16_t SCREEN_W     = 480;
@@ -212,6 +222,19 @@ private:
     static constexpr uint16_t SEQ_SLOT_GAP   = 8;                           // gap between slot columns
     static constexpr uint8_t  SEQ_VISIBLE    = 8;                           // bars drawn per scene
 
+    // ── PTCH page layout ─────────────────────────────────────────────────────
+    // List of Config::PTCH_VISIBLE_ROWS rows, each showing "SLOT NNN  Name".
+    // A banner strip overlays the bottom of the list area when active
+    // (LOADED / SAVED / SAVE_ARMED / etc.) rather than shifting the list,
+    // so the highlighted row position never jumps when a banner appears.
+    static constexpr uint16_t PTCH_PAD_X     = 16;
+    static constexpr uint16_t PTCH_ROW_Y     = PARAM_AREA_Y + 6;
+    static constexpr uint16_t PTCH_ROW_H     = 32;
+    static constexpr uint16_t PTCH_BANNER_H  = 28;
+    // Banner sits at the bottom of the param area, just above the footer.
+    static constexpr uint16_t PTCH_BANNER_Y  =
+        PARAM_AREA_Y + PARAM_AREA_H - PTCH_BANNER_H;
+
     // ── M5 Angle8 pot direction ─────────────────────────────────────────────
     // adcToCC() already inverts so clockwise = higher CC.
     // Set false to avoid double-inversion.  Only set true if adcToCC is
@@ -247,8 +270,7 @@ private:
     // so the static label doesn't flicker on every value change.
     void drawParamCell(uint8_t col, uint8_t row, const ControlSlot& slot,
                        uint8_t value, bool seeking, uint16_t accentColour,
-                       bool isEncoder = false, bool labelStays = false,
-                       bool engineIsVA = false);
+                       bool isEncoder = false, bool labelStays = false);
 
     // ── ENV page rendering ──────────────────────────────────────────────────
     EnvParams readEnvParams(const PageManager& pages) const;
@@ -289,6 +311,26 @@ private:
     // Bar top y given step value and bars-area dimensions. Centralised so
     // erase and redraw agree.
     int16_t seqBarTopY(uint8_t value) const;
+
+    // ── PTCH page rendering (Patch Manager) ─────────────────────────────────
+    // No CC values involved — this is a list browser over PatchStore slots
+    // plus a timed banner, so it has no analogue to the ENV/SEQ "snapshot
+    // struct + operator==" dirty-detection pattern. Instead, refresh just
+    // tracks the last-drawn highlighted slot and banner type/text directly;
+    // any change to either triggers a redraw of the affected region only.
+    void drawPatchPage(const PatchManager& patches);
+    void refreshPatchPage(const PatchManager& patches);
+    // One row of the browse list (slot number + name, or "-- EMPTY --").
+    // highlighted = true draws the selection background + accent text.
+    // Takes the PatchManager reference so it can resolve the slot's name
+    // via PatchManager::slotName() — keeps PatchStore access funnelled
+    // through PatchManager rather than DisplayRenderer reaching past it.
+    void drawPtchRow(const PatchManager& patches, uint8_t rowIdx,
+                     uint8_t slot, bool highlighted);
+    // Banner strip — drawn over the bottom of the list area when active,
+    // erased (redraw rows underneath) when it expires.
+    void drawPtchBanner(const PatchManager& patches);
+    void erasePtchBanner(const PatchManager& patches);
 
     // TCA9554 display reset sequence
     void resetDisplay();

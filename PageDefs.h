@@ -22,6 +22,9 @@ enum class CtrlType : uint8_t {
     ENV,        // Pot: ADSR value, 0–127
     STEP_VAL,   // Pot: step sequencer value, LED brightness = value
     SUB_SEL,    // Encoder push: select sub-page (internal navigation only)
+    ACTION,     // Encoder: internal command (Patch Manager scroll/load/save/
+                // import). No CC dispatch — handled entirely inside
+                // PageManager/PatchManager. slot.cc is unused (set to 0).
     NONE        // Unmapped slot — control is inactive
 };
 
@@ -38,7 +41,11 @@ enum class PageID : uint8_t {
     FX   = 6,   // Effects (2 sub-pages)
     SEQ  = 7,   // Step Sequencer
     PERF = 8,   // Performance
-    COUNT = 9
+    PTCH = 9,   // Patch Manager — long-press ANY ByteButton to open.
+                // Deliberately outside the 0..7 → PageID(i+1) short-press
+                // arithmetic in PageManager::handlePageButtons, so it never
+                // collides with normal page switching.
+    COUNT = 10
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -129,4 +136,5 @@ namespace PageColour {
     static constexpr uint32_t PC_SILVER  = 0x94A3B8;   // FX / REVERB sub
     static constexpr uint32_t PC_PINK    = 0xF472B6;   // SEQ
     static constexpr uint32_t PC_AMBER   = 0xF59E0B;   // PERF
+    static constexpr uint32_t PC_SLATE   = 0x64748B;   // PTCH (Patch Manager)
 } // namespace PageColour
