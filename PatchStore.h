@@ -41,6 +41,14 @@ public:
     // Set patch name only (without saving CC data)
     bool setName(uint8_t slot, const char* name);
 
+    // ── Performance name (Phase 3 stub) ──────────────────────────────────────
+    // A single 16-char performance name, ESP32-local for now (stored in its own
+    // FFat file). The synth's performance/layer state lives on the Teensy; this
+    // is a local label the NameEditor can edit and persist. When the cross-
+    // codebase performance work lands, this is the slot that syncs to it.
+    const char* getPerfName() const { return perfName_; }
+    bool        setPerfName(const char* name);
+
     // Delete a patch slot
     bool remove(uint8_t slot);
 
@@ -51,10 +59,17 @@ private:
     bool mounted_ = false;
     char names_[Config::MAX_PATCHES][17] = {};  // 16 chars + null
 
+    // Performance name (single entry) + its own backing file.
+    char perfName_[17] = {};
+
     // Build file path for a given slot
     static void slotPath(uint8_t slot, char* buf, size_t bufLen);
 
     // Load/save the name index file
     void loadIndex();
     void saveIndex();
+
+    // Load/save the performance-name file.
+    void loadPerfName();
+    void savePerfName();
 };

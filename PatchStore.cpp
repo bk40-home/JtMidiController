@@ -23,6 +23,7 @@
 
 static const char* kPatchDir  = "/patches";
 static const char* kIndexFile = "/patches/index.txt";
+static const char* kPerfFile  = "/patches/perf_name.txt";
 
 bool PatchStore::begin() {
     if (!FFat.begin(true)) {  // true = format on first use
@@ -38,6 +39,7 @@ bool PatchStore::begin() {
     // Initialise names to empty
     memset(names_, 0, sizeof(names_));
     loadIndex();
+    loadPerfName();
 
     mounted_ = true;
     Serial.printf("[PATCH] Store ready, %u patches found\n", count());
@@ -173,5 +175,37 @@ void PatchStore::saveIndex() {
     for (uint8_t i = 0; i < Config::MAX_PATCHES; ++i) {
         f.println(names_[i]);
     }
+    f.close();
+}
+// ── Performance name (Phase 3 stub) ─────────────────────────────────────────
+
+bool PatchStore::setPerfName(const char* name) {
+    if (!mounted_ || !name) return false;
+    strncpy(perfName_, name, 16);
+    perfName_[16] = '\0';
+    savePerfName();
+    return true;
+}
+
+void PatchStore::loadPerfName() {
+    perfName_[0] = '\0';
+    if (!FFat.exists(kPerfFile)) return;
+
+    File f = FFat.open(kPerfFile, "r");
+    if (!f) return;
+
+    String line = f.readStringUntil('\n');
+    line.trim();
+    if (line.length() > 0 && line.length() <= 16) {
+        strncpy(perfName_, line.c_str(), 16);
+        perfName_[16] = '\0';
+    }
+    f.close();
+}
+
+void PatchStore::savePerfName() {
+    File f = FFat.open(kPerfFile, "w");
+    if (!f) return;
+    f.println(perfName_);
     f.close();
 }

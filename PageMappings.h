@@ -1,563 +1,605 @@
-// =============================================================================
-// PageMappings.h — JT-8000 complete CC mapping tables
-// =============================================================================
-// SOURCE OF TRUTH: JT8000_UI_Controller_Handoff.md + JT8000_ControlMapping.jsx
-//
-// ALL CC assignments live here as const data. To remap a control, change the
-// table entry — no code changes needed anywhere else. PageManager indexes
-// into these arrays at runtime.
-//
-// Organisation:
-//   kHomeMapping        — HOME page (no ByteSwitch active)
-//   kOscSubPages[2]     — Page 1: OSC (OSC1, OSC2 sub-pages; Scene B = advanced)
-//   kMixMapping         — Page 2: MIX
-//   kFltSubPages[2]     — Page 3: FLT (Core, Multimode sub-pages)
-//   kEnvSubPages[3]     — Page 4: ENV (AMP, FILTER, PITCH sub-pages)
-//   kLfoSubPages[2]     — Page 5: LFO (LFO1, LFO2 sub-pages)
-//   kFxSubPages[2]      — Page 6: FX  (EFFECTS, REVERB sub-pages)
-//   kSeqMapping         — Page 7: SEQ
-//   kPerfMapping        — Page 8: PERF (incl. Velocity, BPM, Clock)
-//
-// The getPageMapping() function returns the active mapping for any page/sub.
-// =============================================================================
-#pragma once
-
-#include "PageDefs.h"
-#include "ParamDefs.h"
-
-namespace PageMap {
-
-// ─── Shorthand for readability ──────────────────────────────────────────────
-// S() builds a ControlSlot in-place. N is the null/inactive slot.
-#define S(lbl, ccNum, typ) { lbl, ccNum, CtrlType::typ }
-#define N                  SLOT_NONE
-
-// =============================================================================
-// HOME — default page when no edit page is active
-// =============================================================================
-static const PageMapping kHomeMapping = {
-    "HOME", "HOME", PageColour::PC_ORANGE,
-    // potsA — Primary Performance
-    { S("CUTOFF",       CC::FILTER_CUTOFF,     CONT),
-      S("RESONANCE",    CC::FILTER_RESONANCE,  CONT),
-      S("FILT ENV AMT", CC::FILTER_ENV_AMOUNT, BIPOLAR),
-      S("OSC BALANCE",  CC::OSC_MIX_BALANCE,   BIPOLAR),
-      S("LFO1 RATE",    CC::LFO1_FREQ,         CONT),
-      S("LFO1 DEPTH",   CC::LFO1_DEPTH,        CONT),
-      S("REV MIX",      CC::FX_REVERB_MIX,     CONT),
-      S("AMP LEVEL",    CC::AMP_MOD_FIXED_LEVEL, CONT) },
-    // potsB — FX Tweaking
-    { S("MOD MIX",   CC::FX_MOD_MIX,            CONT),
-      S("MOD RATE",  CC::FX_MOD_RATE,            CONT),
-      S("DLY MIX",   CC::FX_JPFX_DELAY_MIX,     CONT),
-      S("DLY TIME",  CC::FX_JPFX_DELAY_TIME,     CONT),
-      S("DLY FB",    CC::FX_JPFX_DELAY_FEEDBACK,  CONT),
-      S("DRY MIX",   CC::FX_DRY_MIX,             CONT),
-      S("JPFX MIX",  CC::FX_JPFX_MIX,            CONT),
-      S("REV SIZE",  CC::FX_REVERB_SIZE,          CONT) },
-    // encsA — Quick Sound Selection
-    { S("OSC1 WAVE",  CC::OSC1_WAVE,       SELECT),
-      S("OSC2 WAVE",  CC::OSC2_WAVE,       SELECT),
-      S("FILT MODE",  CC::FILTER_MODE,     SELECT),
-      S("LFO1 WAVE",  CC::LFO1_WAVEFORM,  SELECT),
-      S("LFO1 DEST",  CC::LFO1_DESTINATION, SELECT),
-      S("POLY MODE",  CC::POLY_MODE,       SELECT),
-      S("GLIDE ON",   CC::GLIDE_ENABLE,    TOGGLE),
-      S("PERF MODE",  CC::PERF_MODE,       SELECT) },
-    // encsB — Secondary Selections
-    { S("OSC1 PITCH",  CC::OSC1_PITCH_OFFSET, SELECT),
-      S("OSC2 PITCH",  CC::OSC2_PITCH_OFFSET, SELECT),
-      S("FILT ENGINE", CC::FILTER_ENGINE,     SELECT),
-      S("LFO2 WAVE",   CC::LFO2_WAVEFORM,    SELECT),
-      S("LFO2 DEST",   CC::LFO2_DESTINATION, SELECT),
-      S("DRIVE",       CC::FX_DRIVE,         SELECT),
-      S("MOD TYPE",    CC::FX_MOD_EFFECT,    SELECT),
-      S("DLY TYPE",    CC::FX_JPFX_DELAY_EFFECT, SELECT) }
-};
-
-// =============================================================================
-// Page 1: OSC — Oscillators (Cyan) — 2 sub-pages: OSC1, OSC2
-// =============================================================================
-// Scene A pots = main params (wave, tuning, supersaw, feedback)
-// Scene B pots = advanced params (DC, ring, arbitrary waveform)
-
-// Sub 0: OSC1
-static const PageMapping kOsc1Mapping = {
-    "OSC 1", "OSC1", PageColour::PC_CYAN,
-    // potsA — Main: wave, tuning, supersaw, feedback
-    { S("WAVE",     CC::OSC1_WAVE,            SELECT),
-      S("PITCH",    CC::OSC1_PITCH_OFFSET,    SELECT),
-      S("FINE",     CC::OSC1_FINE_TUNE,       BIPOLAR),
-      S("DETUNE",   CC::OSC1_DETUNE,          BIPOLAR),
-      S("SS DET",   CC::SUPERSAW1_DETUNE,     CONT),
-      S("SS MIX",   CC::SUPERSAW1_MIX,        CONT),
-      S("FB AMT",   CC::OSC1_FEEDBACK_AMOUNT, CONT),
-      S("FB MIX",   CC::OSC1_FEEDBACK_MIX,    CONT) },
-    // potsB — Advanced: DC, ring, arbitrary
-    { S("FREQ DC",  CC::OSC1_FREQ_DC,    BIPOLAR),
-      S("SHAPE DC", CC::OSC1_SHAPE_DC,   BIPOLAR),
-      S("RING MIX", CC::RING1_MIX,       CONT),
-      S("ARB BANK", CC::OSC1_ARB_BANK,   CONT),
-      S("ARB IDX",  CC::OSC1_ARB_INDEX,  CONT),
-      N, N, N },
-    // encsA — sub-page selectors only
-    { S("OSC1",  0, SUB_SEL),
-      S("OSC2",  0, SUB_SEL),
-      N, N, N, N, N, N },
-    { N, N, N, N, N, N, N, N }
-};
-
-// Sub 1: OSC2
-static const PageMapping kOsc2Mapping = {
-    "OSC 2", "OSC2", PageColour::PC_CYAN,
-    // potsA — Main: wave, tuning, supersaw, feedback
-    { S("WAVE",     CC::OSC2_WAVE,            SELECT),
-      S("PITCH",    CC::OSC2_PITCH_OFFSET,    SELECT),
-      S("FINE",     CC::OSC2_FINE_TUNE,       BIPOLAR),
-      S("DETUNE",   CC::OSC2_DETUNE,          BIPOLAR),
-      S("SS DET",   CC::SUPERSAW2_DETUNE,     CONT),
-      S("SS MIX",   CC::SUPERSAW2_MIX,        CONT),
-      S("FB AMT",   CC::OSC2_FEEDBACK_AMOUNT, CONT),
-      S("FB MIX",   CC::OSC2_FEEDBACK_MIX,    CONT) },
-    // potsB — Advanced: DC, ring, arbitrary
-    { S("FREQ DC",  CC::OSC2_FREQ_DC,    BIPOLAR),
-      S("SHAPE DC", CC::OSC2_SHAPE_DC,   BIPOLAR),
-      S("RING MIX", CC::RING2_MIX,       CONT),
-      S("ARB BANK", CC::OSC2_ARB_BANK,   CONT),
-      S("ARB IDX",  CC::OSC2_ARB_INDEX,  CONT),
-      N, N, N },
-    // encsA — sub-page selectors only
-    { S("OSC1",  0, SUB_SEL),
-      S("OSC2",  0, SUB_SEL),
-      N, N, N, N, N, N },
-    { N, N, N, N, N, N, N, N }
-};
-
-static const PageMapping kOscSubPages[] = { kOsc1Mapping, kOsc2Mapping };
-
-// =============================================================================
-// Page 2: MIX — Mixer (Green)
-// =============================================================================
-static const PageMapping kMixMapping = {
-    "MIXER", "MIX", PageColour::PC_GREEN,
-    // potsA
-    { S("OSC1 MIX",  CC::OSC1_MIX,  CONT),
-      S("OSC2 MIX",  CC::OSC2_MIX,  CONT),
-      S("SUB MIX",   CC::SUB_MIX,   CONT),
-      S("NOISE MIX", CC::NOISE_MIX, CONT),
-      N, N, N, N },
-    // potsB — empty
-    { N, N, N, N, N, N, N, N },
-    // encsA
-    { S("OSC BALANCE", CC::OSC_MIX_BALANCE,   BIPOLAR),
-      S("CROSS MOD",   CC::OSC_CROSS_MOD_DEPTH, CONT),
-      S("OSC SYNC",    CC::OSC_SYNC_ENABLE,   TOGGLE),
-      N, N, N, N, N },
-    // encsB — empty
-    { N, N, N, N, N, N, N, N }
-};
-
-// =============================================================================
-// Page 3: FLT — Filter (Orange)
-// =============================================================================
-// =============================================================================
-// Page 3: FLT — Filter (Orange) — 2 sub-pages: Core, Multimode
-// =============================================================================
-
-// Sub 0: Core — main filter controls
-static const PageMapping kFltCoreMapping = {
-    "FILTER", "CORE", PageColour::PC_ORANGE,
-    // potsA — core continuous + topology selects
-    { S("CUTOFF",   CC::FILTER_CUTOFF,     CONT),
-      S("RESO",     CC::FILTER_RESONANCE,  CONT),
-      S("ENV AMT",  CC::FILTER_ENV_AMOUNT, BIPOLAR),
-      S("KEY TRK",  CC::FILTER_KEY_TRACK,  BIPOLAR),
-      S("ENGINE",   CC::FILTER_ENGINE,     SELECT),
-      S("MODE",     CC::FILTER_MODE,       SELECT),
-      S("VA TYPE",  CC::VA_FILTER_TYPE,    SELECT),
-      S("OCT CTRL", CC::FILTER_OCTAVE_CONTROL, CONT) },
-    { N, N, N, N, N, N, N, N },
-    // encsA — sub-page selectors only
-    { S("CORE",  0, SUB_SEL),
-      S("MULTI", 0, SUB_SEL),
-      N, N, N, N, N, N },
-    { N, N, N, N, N, N, N, N }
-};
-
-// Sub 1: Multimode / Xpander
-static const PageMapping kFltMultiMapping = {
-    "MULTIMODE", "MULTI", PageColour::PC_ORANGE,
-    // potsA — Xpander and multimode params
-    { S("XP MODE", CC::FILTER_OBXA_XPANDER_MODE, SELECT),
-      S("RES MOD", CC::FILTER_OBXA_RES_MOD_DEPTH, CONT),
-      S("MULTI",   CC::FILTER_OBXA_MULTIMODE,     CONT),
-      N, N, N, N, N },
-    { N, N, N, N, N, N, N, N },
-    // encsA — sub-page selectors only
-    { S("CORE",  0, SUB_SEL),
-      S("MULTI", 0, SUB_SEL),
-      N, N, N, N, N, N },
-    { N, N, N, N, N, N, N, N }
-};
-
-static const PageMapping kFltSubPages[] = { kFltCoreMapping, kFltMultiMapping };
-
-// =============================================================================
-// Page 4: ENV — Envelopes (Red) — 3 sub-pages
-// =============================================================================
-
-// Sub 0: AMP envelope
-static const PageMapping kEnvAmpMapping = {
-    "AMP", "AMP", PageColour::PC_RED,
-    // potsA — ADSR (0–3) + curve controls (4–6)
-    { S("ATTACK",  CC::AMP_ATTACK,  ENV),
-      S("DECAY",   CC::AMP_DECAY,   ENV),
-      S("SUSTAIN", CC::AMP_SUSTAIN,  ENV),
-      S("RELEASE", CC::AMP_RELEASE,  ENV),
-      S("ATK CRV", CC::AMP_ATTACK_CURVE,  CONT),
-      S("DEC CRV", CC::AMP_DECAY_CURVE,   CONT),
-      S("REL CRV", CC::AMP_RELEASE_CURVE, CONT),
-      N },
-    // potsB — empty
-    { N, N, N, N, N, N, N, N },
-    // encsA — sub-page selectors only (curves moved to pots)
-    { S("AMP",     0, SUB_SEL),
-      S("FILT",    0, SUB_SEL),
-      S("PITCH",   0, SUB_SEL),
-      N, N, N, N, N },
-    // encsB — empty
-    { N, N, N, N, N, N, N, N }
-};
-
-// Sub 1: FILTER envelope
-static const PageMapping kEnvFilterMapping = {
-    "FILTER", "FILT", PageColour::PC_GOLD,
-    // potsA — ADSR (0–3) + curve controls (4–6)
-    { S("ATTACK",  CC::FILTER_ENV_ATTACK,  ENV),
-      S("DECAY",   CC::FILTER_ENV_DECAY,   ENV),
-      S("SUSTAIN", CC::FILTER_ENV_SUSTAIN,  ENV),
-      S("RELEASE", CC::FILTER_ENV_RELEASE,  ENV),
-      S("ATK CRV", CC::FILTER_ATTACK_CURVE,  CONT),
-      S("DEC CRV", CC::FILTER_DECAY_CURVE,   CONT),
-      S("REL CRV", CC::FILTER_RELEASE_CURVE, CONT),
-      N },
-    // potsB — empty
-    { N, N, N, N, N, N, N, N },
-    // encsA — sub-page selectors only (curves moved to pots)
-    { S("AMP",     0, SUB_SEL),
-      S("FILT",    0, SUB_SEL),
-      S("PITCH",   0, SUB_SEL),
-      N, N, N, N, N },
-    { N, N, N, N, N, N, N, N }
-};
-
-// Sub 2: PITCH envelope (CCs 65–69 defined in ParamDefs.h)
-static const PageMapping kEnvPitchMapping = {
-    "PITCH", "PITCH", PageColour::PC_MAGENTA,
-    // potsA — ADSR (0–3) + depth (4) + curves (5–7)
-    { S("ATTACK",  CC::PITCH_ENV_ATTACK,   ENV),
-      S("DECAY",   CC::PITCH_ENV_DECAY,    ENV),
-      S("SUSTAIN", CC::PITCH_ENV_SUSTAIN,  ENV),
-      S("RELEASE", CC::PITCH_ENV_RELEASE,  ENV),
-      S("DEPTH",   CC::PITCH_ENV_DEPTH,       BIPOLAR),
-      S("ATK CRV", CC::PITCH_ATTACK_CURVE,   CONT),
-      S("DEC CRV", CC::PITCH_DECAY_CURVE,    CONT),
-      S("REL CRV", CC::PITCH_RELEASE_CURVE,  CONT) },
-    // potsB — empty
-    { N, N, N, N, N, N, N, N },
-    // encsA — sub-page selectors only (depth + curves moved to pots)
-    { S("AMP",     0, SUB_SEL),
-      S("FILT",    0, SUB_SEL),
-      S("PITCH",   0, SUB_SEL),
-      N, N, N, N, N },
-    // encsB — empty
-    { N, N, N, N, N, N, N, N }
-};
-
-static const PageMapping kEnvSubPages[3] = {
-    kEnvAmpMapping, kEnvFilterMapping, kEnvPitchMapping
-};
-
-// =============================================================================
-// Page 5: LFO (Purple) — 2 sub-pages
-// =============================================================================
-
-// Sub 0: LFO1
-static const PageMapping kLfo1Mapping = {
-    "LFO1", "LFO1", PageColour::PC_PURPLE,
-    // potsA
-    { S("RATE",       CC::LFO1_FREQ,         CONT),
-      S("DEPTH",      CC::LFO1_DEPTH,        CONT),
-      S("DELAY",      CC::LFO1_DELAY,        CONT),
-      S("PITCH DEP",  CC::LFO1_PITCH_DEPTH,  CONT),
-      S("FILT DEP",   CC::LFO1_FILTER_DEPTH, CONT),
-      S("PWM DEP",    CC::LFO1_PWM_DEPTH,    CONT),
-      S("AMP DEP",    CC::LFO1_AMP_DEPTH,    CONT),
-      N },
-    { N, N, N, N, N, N, N, N },
-    // encsA
-    { S("LFO1",     0, SUB_SEL),
-      S("LFO2",     0, SUB_SEL),
-      S("WAVEFORM",  CC::LFO1_WAVEFORM,    SELECT),
-      S("DEST",      CC::LFO1_DESTINATION, SELECT),
-      S("SYNC",      CC::LFO1_TIMING_MODE, SELECT),
-      N, N, N },
-    { N, N, N, N, N, N, N, N }
-};
-
-// Sub 1: LFO2
-static const PageMapping kLfo2Mapping = {
-    "LFO2", "LFO2", PageColour::PC_INDIGO,
-    { S("RATE",       CC::LFO2_FREQ,         CONT),
-      S("DEPTH",      CC::LFO2_DEPTH,        CONT),
-      S("DELAY",      CC::LFO2_DELAY,        CONT),
-      S("PITCH DEP",  CC::LFO2_PITCH_DEPTH,  CONT),
-      S("FILT DEP",   CC::LFO2_FILTER_DEPTH, CONT),
-      S("PWM DEP",    CC::LFO2_PWM_DEPTH,    CONT),
-      S("AMP DEP",    CC::LFO2_AMP_DEPTH,    CONT),
-      N },
-    { N, N, N, N, N, N, N, N },
-    { S("LFO1",     0, SUB_SEL),
-      S("LFO2",     0, SUB_SEL),
-      S("WAVEFORM",  CC::LFO2_WAVEFORM,    SELECT),
-      S("DEST",      CC::LFO2_DESTINATION, SELECT),
-      S("SYNC",      CC::LFO2_TIMING_MODE, SELECT),
-      N, N, N },
-    { N, N, N, N, N, N, N, N }
-};
-
-static const PageMapping kLfoSubPages[2] = {
-    kLfo1Mapping, kLfo2Mapping
-};
-
-// =============================================================================
-// Page 6: FX (Teal) — 2 sub-pages
-// =============================================================================
-
-// Sub 0: EFFECTS
-static const PageMapping kFxEffectsMapping = {
-    "EFFECTS", "FX", PageColour::PC_TEAL,
-    // potsA
-    { S("MOD MIX",  CC::FX_MOD_MIX,             CONT),
-      S("MOD RATE", CC::FX_MOD_RATE,             CONT),
-      S("MOD FB",   CC::FX_MOD_FEEDBACK,         CONT),
-      S("DLY TIME", CC::FX_JPFX_DELAY_TIME,      CONT),
-      S("DLY MIX",  CC::FX_JPFX_DELAY_MIX,       CONT),
-      S("DLY FB",   CC::FX_JPFX_DELAY_FEEDBACK,   CONT),
-      S("DRY MIX",  CC::FX_DRY_MIX,              CONT),
-      S("JPFX MIX", CC::FX_JPFX_MIX,             CONT) },
-    { N, N, N, N, N, N, N, N },
-    // encsA
-    { S("FX",       0, SUB_SEL),
-      S("REVERB",   0, SUB_SEL),
-      S("MOD TYPE", CC::FX_MOD_EFFECT,           SELECT),
-      S("DLY TYPE", CC::FX_JPFX_DELAY_EFFECT,    SELECT),
-      S("DRIVE",    CC::FX_DRIVE,                SELECT),
-      S("DLY SYNC", CC::DELAY_TIMING_MODE,       SELECT),
-      S("BASS",     CC::FX_BASS_GAIN,            BIPOLAR),
-      S("TREBLE",   CC::FX_TREBLE_GAIN,          BIPOLAR) },
-    { N, N, N, N, N, N, N, N }
-};
-
-// Sub 1: REVERB (Global FX scope — shared across layers)
-static const PageMapping kFxReverbMapping = {
-    "REVERB", "REV", PageColour::PC_SILVER,
-    // potsA
-    { S("SIZE",     CC::FX_REVERB_SIZE,    CONT),
-      S("HI DAMP",  CC::FX_REVERB_DAMP,    CONT),
-      S("LO DAMP",  CC::FX_REVERB_LODAMP,  CONT),
-      S("MIX",      CC::FX_REVERB_MIX,     CONT),
-      S("SHIMMER",  CC::FX_REVERB_SHIMMER, CONT),
-      S("LO PASS",  CC::FX_REVERB_LOWPASS, CONT),
-      S("HI PASS",  CC::FX_REVERB_HIPASS,  CONT),
-      N },
-    { N, N, N, N, N, N, N, N },
-    // encsA
-    { S("FX",      0, SUB_SEL),
-      S("REVERB",  0, SUB_SEL),
-      S("BYPASS",  CC::FX_REVERB_BYPASS, TOGGLE),
-      S("FREEZE",  CC::FX_REVERB_FREEZE, TOGGLE),
-      N, N, N, N },
-    { N, N, N, N, N, N, N, N }
-};
-
-static const PageMapping kFxSubPages[2] = {
-    kFxEffectsMapping, kFxReverbMapping
-};
-
-// =============================================================================
-// Page 7: SEQ — Step Sequencer (Pink)
-// =============================================================================
-static const PageMapping kSeqMapping = {
-    "SEQUENCER", "SEQ", PageColour::PC_PINK,
-    // potsA — Steps 1–8 (all use CC::SEQ_STEP_VALUE with step addressing)
-    { S("STEP 1", CC::SEQ_STEP_VALUE, STEP_VAL),
-      S("STEP 2", CC::SEQ_STEP_VALUE, STEP_VAL),
-      S("STEP 3", CC::SEQ_STEP_VALUE, STEP_VAL),
-      S("STEP 4", CC::SEQ_STEP_VALUE, STEP_VAL),
-      S("STEP 5", CC::SEQ_STEP_VALUE, STEP_VAL),
-      S("STEP 6", CC::SEQ_STEP_VALUE, STEP_VAL),
-      S("STEP 7", CC::SEQ_STEP_VALUE, STEP_VAL),
-      S("STEP 8", CC::SEQ_STEP_VALUE, STEP_VAL) },
-    // potsB — Steps 9–16
-    { S("STEP 9",  CC::SEQ_STEP_VALUE, STEP_VAL),
-      S("STEP 10", CC::SEQ_STEP_VALUE, STEP_VAL),
-      S("STEP 11", CC::SEQ_STEP_VALUE, STEP_VAL),
-      S("STEP 12", CC::SEQ_STEP_VALUE, STEP_VAL),
-      S("STEP 13", CC::SEQ_STEP_VALUE, STEP_VAL),
-      S("STEP 14", CC::SEQ_STEP_VALUE, STEP_VAL),
-      S("STEP 15", CC::SEQ_STEP_VALUE, STEP_VAL),
-      S("STEP 16", CC::SEQ_STEP_VALUE, STEP_VAL) },
-    // encsA — Settings
-    { S("ENABLE",    CC::SEQ_ENABLE,      TOGGLE),
-      S("DIRECTION", CC::SEQ_DIRECTION,   SELECT),
-      S("DEST",      CC::SEQ_DESTINATION, SELECT),
-      S("SYNC",      CC::SEQ_TIMING_MODE, SELECT),
-      S("RETRIGGER", CC::SEQ_RETRIGGER,   TOGGLE),
-      S("DEPTH",     CC::SEQ_DEPTH,       BIPOLAR),
-      N, N },
-    // encsB — Continuous Settings
-    { S("STEPS",  CC::SEQ_STEPS,       CONT),
-      S("GATE",   CC::SEQ_GATE_LENGTH, CONT),
-      S("SLIDE",  CC::SEQ_SLIDE,       CONT),
-      S("RATE",   CC::SEQ_RATE,        CONT),
-      N, N, N, N }
-};
-
-// =============================================================================
-// Page 8: PERF — Performance (Amber)
-// =============================================================================
-// =============================================================================
-// Page 8: PERF — Performance (Amber)
-// =============================================================================
-// Scene A pots: main performance params (glide, voice, bend, level, bpm)
-// Scene B pots: velocity sensitivity (set-per-patch, less frequently tweaked)
-// Encoders: mode selectors (always accessible regardless of pot scene)
-static const PageMapping kPerfMapping = {
-    "PERFORMANCE", "PERF", PageColour::PC_AMBER,
-    // potsA — Performance (Scene A)
-    { S("GLIDE TIME", CC::GLIDE_TIME,          CONT),
-      S("UNI DETUNE", CC::UNISON_DETUNE,       CONT),
-      S("BEND RANGE", CC::PITCH_BEND_RANGE,    CONT),
-      S("AMP LEVEL",  CC::AMP_MOD_FIXED_LEVEL, CONT),
-      S("BPM",        CC::BPM_INTERNAL_TEMPO,  CONT),
-      N, N, N },
-    // potsB — Settings (Scene B): velocity, voice split, MIDI channels
-    { S("VEL AMP",    CC::VELOCITY_AMP_SENS,    CONT),
-      S("VEL FILT",   CC::VELOCITY_FILTER_SENS, CONT),
-      S("VEL ENV",    CC::VELOCITY_ENV_SENS,    CONT),
-      S("VOICES",     CC::PERF_VOICE_SPLIT,     CONT),
-      S("SPLIT PT",   CC::PERF_SPLIT_NOTE,      CONT),
-      S("BALANCE",    CC::PERF_BALANCE,          BIPOLAR),
-      S("MIDI CH A",  CC::PERF_MIDI_CHANNEL_A,  CONT),
-      S("MIDI CH B",  CC::PERF_MIDI_CHANNEL_B,  CONT) },
-    // encsA — Mode selectors (fill empty pot cells on both scenes)
-    { S("GLIDE ON",    CC::GLIDE_ENABLE,     TOGGLE),
-      S("POLY MODE",   CC::POLY_MODE,        SELECT),
-      S("CLK SRC",     CC::BPM_CLOCK_SOURCE, SELECT),
-      S("PERF MODE",   CC::PERF_MODE,        SELECT),
-      S("EDIT TARGET", CC::PERF_EDIT_TARGET, SELECT),
-      N, N, N },
-    { N, N, N, N, N, N, N, N }
-};
-
-// =============================================================================
-// PTCH — Patch Manager (long-press ANY ByteButton to open, from any page)
-// =============================================================================
-// No pots used — potsA/potsB are intentionally all N. The four actions live
-// on dedicated encoders rather than one multi-mode encoder, matching the
-// existing PERF-style "one control, one job" convention used elsewhere in
-// this file:
-//
-//   encsA[0]  SCROLL  — rotate only, moves the highlighted slot up/down the
-//                        browse list. Push is a no-op (PatchManager ignores
-//                        isPush==true for this encoder index).
-//   encsA[1]  LOAD    — push loads the highlighted slot. Non-destructive,
-//                        so no confirmation step. Rotation ignored.
-//   encsA[2]  SAVE    — push arms a save; a second push within
-//                        Config::PTCH_SAVE_ARM_MS commits it. Destructive,
-//                        so it always requires the explicit two-step
-//                        confirm per the project's standing rule on
-//                        confirming before changing stored data. Rotation
-//                        ignored.
-//   encsA[3]  IMPORT  — push opens the SYX import picker. STUBBED this
-//                        pass — PatchManager shows a "COMING SOON" banner
-//                        instead of importing. Rotation ignored.
-//
-// DisplayRenderer never reads slot.cc for ACTION types (there's nothing to
-// show as a CC value) — it routes PTCH through its own drawPatchPage(),
-// same pattern as the ENV/SEQ custom pages.
-// =============================================================================
-static const PageMapping kPtchMapping = {
-    "PATCH MANAGER", "PTCH", PageColour::PC_SLATE,
-    // potsA — unused
-    { N, N, N, N, N, N, N, N },
-    // potsB — unused
-    { N, N, N, N, N, N, N, N },
-    // encsA — the four PTCH actions
-    { S("SCROLL", 0, ACTION),
-      S("LOAD",   0, ACTION),
-      S("SAVE",   0, ACTION),
-      S("IMPORT", 0, ACTION),
-      N, N, N, N },
-    // encsB — unused (no scene-B variant for PTCH)
-    { N, N, N, N, N, N, N, N }
-};
-
-// =============================================================================
-// Lookup helpers — PageManager uses these to get the active mapping
-// =============================================================================
-
-// Returns true if the given page has sub-pages
-inline bool hasSubPages(PageID page) {
-    return page == PageID::OSC || page == PageID::FLT
-        || page == PageID::ENV || page == PageID::LFO || page == PageID::FX;
-}
-
-// Returns the sub-page count for pages that have them (0 otherwise)
-inline uint8_t subPageCount(PageID page) {
-    switch (page) {
-        case PageID::OSC: return 2;
-        case PageID::FLT: return 2;
-        case PageID::ENV: return 3;
-        case PageID::LFO: return 2;
-        case PageID::FX:  return 2;
-        default:          return 0;
-    }
-}
-
-// Returns the mapping for a flat page (no sub-pages)
-inline const PageMapping& getFlatMapping(PageID page) {
-    switch (page) {
-        case PageID::MIX:  return kMixMapping;
-        case PageID::SEQ:  return kSeqMapping;
-        case PageID::PERF: return kPerfMapping;
-        case PageID::PTCH: return kPtchMapping;
-        default:           return kHomeMapping;
-    }
-}
-
-// Returns the mapping for a sub-page (page must have sub-pages)
-inline const PageMapping& getSubMapping(PageID page, uint8_t subIdx) {
-    switch (page) {
-        case PageID::OSC: return kOscSubPages[subIdx < 2 ? subIdx : 0];
-        case PageID::FLT: return kFltSubPages[subIdx < 2 ? subIdx : 0];
-        case PageID::ENV: return kEnvSubPages[subIdx < 3 ? subIdx : 0];
-        case PageID::LFO: return kLfoSubPages[subIdx < 2 ? subIdx : 0];
-        case PageID::FX:  return kFxSubPages[subIdx < 2 ? subIdx : 0];
-        default:          return kHomeMapping;
-    }
-}
-
-// Returns the active mapping for any page/sub combination
-inline const PageMapping& getMapping(PageID page, uint8_t subIdx = 0) {
-    if (page == PageID::HOME) return kHomeMapping;
-    if (hasSubPages(page))    return getSubMapping(page, subIdx);
-    return getFlatMapping(page);
-}
-
-// Clean up macros — not needed outside this header
-#undef S
-#undef N
-
-} // namespace PageMap
+// =============================================================================
+// PageMappings.h — JT-8000 complete CC mapping tables
+// =============================================================================
+// SOURCE OF TRUTH: JT8000_UI_Controller_Handoff.md + JT8000_ControlMapping.jsx
+//
+// ALL CC assignments live here as const data. To remap a control, change the
+// table entry — no code changes needed anywhere else. PageManager indexes
+// into these arrays at runtime.
+//
+// Organisation:
+//   kHomeMapping        — HOME page (no ByteSwitch active)
+//   kOscSubPages[2]     — Page 1: OSC (OSC1, OSC2 sub-pages; Scene B = advanced)
+//   kMixMapping         — Page 2: MIX
+//   kFltSubPages[2]     — Page 3: FLT (Core, Multimode sub-pages)
+//   kEnvSubPages[3]     — Page 4: ENV (AMP, FILTER, PITCH sub-pages)
+//   kLfoSubPages[2]     — Page 5: LFO (LFO1, LFO2 sub-pages)
+//   kFxSubPages[2]      — Page 6: FX  (EFFECTS, REVERB sub-pages)
+//   kSeqMapping         — Page 7: SEQ
+//   kPerfMapping        — Page 8: PERF (incl. Velocity, BPM, Clock)
+//
+// The getPageMapping() function returns the active mapping for any page/sub.
+// =============================================================================
+#pragma once
+
+#include "PageDefs.h"
+#include "ParamDefs.h"
+
+namespace PageMap {
+
+// ─── Shorthand for readability ──────────────────────────────────────────────
+// S() builds a ControlSlot in-place. N is the null/inactive slot.
+#define S(lbl, ccNum, typ) { lbl, ccNum, CtrlType::typ }
+#define N                  SLOT_NONE
+
+// =============================================================================
+// HOME — default page when no edit page is active
+// =============================================================================
+static const PageMapping kHomeMapping = {
+    "HOME", "HOME", PageColour::PC_ORANGE,
+    // potsA — Primary Performance
+    { S("CUTOFF",       CC::FILTER_CUTOFF,     CONT),
+      S("RESONANCE",    CC::FILTER_RESONANCE,  CONT),
+      S("FILT ENV AMT", CC::FILTER_ENV_AMOUNT, BIPOLAR),
+      S("OSC BALANCE",  CC::OSC_MIX_BALANCE,   BIPOLAR),
+      S("LFO1 RATE",    CC::LFO1_FREQ,         CONT),
+      S("LFO1 DEPTH",   CC::LFO1_DEPTH,        CONT),
+      S("REV MIX",      CC::FX_REVERB_MIX,     CONT),
+      S("AMP LEVEL",    CC::AMP_MOD_FIXED_LEVEL, CONT) },
+    // potsB — FX Tweaking
+    { S("MOD MIX",   CC::FX_MOD_MIX,            CONT),
+      S("MOD RATE",  CC::FX_MOD_RATE,            CONT),
+      S("DLY MIX",   CC::FX_JPFX_DELAY_MIX,     CONT),
+      S("DLY TIME",  CC::FX_JPFX_DELAY_TIME,     CONT),
+      S("DLY FB",    CC::FX_JPFX_DELAY_FEEDBACK,  CONT),
+      S("DRY MIX",   CC::FX_DRY_MIX,             CONT),
+      S("JPFX MIX",  CC::FX_JPFX_MIX,            CONT),
+      S("REV SIZE",  CC::FX_REVERB_SIZE,          CONT) },
+    // encsA — Quick Sound Selection
+    { S("OSC1 WAVE",  CC::OSC1_WAVE,       SELECT),
+      S("OSC2 WAVE",  CC::OSC2_WAVE,       SELECT),
+      S("FILT MODE",  CC::FILTER_MODE,     SELECT),
+      S("LFO1 WAVE",  CC::LFO1_WAVEFORM,  SELECT),
+      S("LFO1 DEST",  CC::LFO1_DESTINATION, SELECT),
+      S("POLY MODE",  CC::POLY_MODE,       SELECT),
+      S("GLIDE ON",   CC::GLIDE_ENABLE,    TOGGLE),
+      S("PERF MODE",  CC::PERF_MODE,       SELECT) },
+    // encsB — Secondary Selections
+    { S("OSC1 PITCH",  CC::OSC1_PITCH_OFFSET, SELECT),
+      S("OSC2 PITCH",  CC::OSC2_PITCH_OFFSET, SELECT),
+      S("FILT ENGINE", CC::FILTER_ENGINE,     SELECT),
+      S("LFO2 WAVE",   CC::LFO2_WAVEFORM,    SELECT),
+      S("LFO2 DEST",   CC::LFO2_DESTINATION, SELECT),
+      S("DRIVE",       CC::FX_DRIVE,         SELECT),
+      S("MOD TYPE",    CC::FX_MOD_EFFECT,    SELECT),
+      S("DLY TYPE",    CC::FX_JPFX_DELAY_EFFECT, SELECT) }
+};
+
+// =============================================================================
+// Page 1: OSC — Oscillators (Cyan) — 2 sub-pages: OSC1, OSC2
+// =============================================================================
+// Scene A pots = main params (wave, tuning, supersaw, feedback)
+// Scene B pots = advanced params (DC, ring, arbitrary waveform)
+
+// Sub 0: OSC1
+static const PageMapping kOsc1Mapping = {
+    "OSC 1", "OSC1", PageColour::PC_CYAN,
+    // potsA — Main: wave, tuning, supersaw, feedback
+    { S("WAVE",     CC::OSC1_WAVE,            SELECT),
+      S("PITCH",    CC::OSC1_PITCH_OFFSET,    SELECT),
+      S("FINE",     CC::OSC1_FINE_TUNE,       BIPOLAR),
+      S("DETUNE",   CC::OSC1_DETUNE,          BIPOLAR),
+      S("SS DET",   CC::SUPERSAW1_DETUNE,     CONT),
+      S("SS MIX",   CC::SUPERSAW1_MIX,        CONT),
+      S("FB AMT",   CC::OSC1_FEEDBACK_AMOUNT, CONT),
+      S("FB MIX",   CC::OSC1_FEEDBACK_MIX,    CONT) },
+    // potsB — Advanced: DC, ring, arbitrary
+    { S("FREQ DC",  CC::OSC1_FREQ_DC,    BIPOLAR),
+      S("SHAPE DC", CC::OSC1_SHAPE_DC,   BIPOLAR),
+      S("RING MIX", CC::RING1_MIX,       CONT),
+      S("ARB BANK", CC::OSC1_ARB_BANK,   CONT),
+      S("ARB IDX",  CC::OSC1_ARB_INDEX,  CONT),
+      N, N, N },
+    // encsA — sub-page selectors only
+    { S("OSC1",  0, SUB_SEL),
+      S("OSC2",  0, SUB_SEL),
+      N, N, N, N, N, N },
+    { N, N, N, N, N, N, N, N }
+};
+
+// Sub 1: OSC2
+static const PageMapping kOsc2Mapping = {
+    "OSC 2", "OSC2", PageColour::PC_CYAN,
+    // potsA — Main: wave, tuning, supersaw, feedback
+    { S("WAVE",     CC::OSC2_WAVE,            SELECT),
+      S("PITCH",    CC::OSC2_PITCH_OFFSET,    SELECT),
+      S("FINE",     CC::OSC2_FINE_TUNE,       BIPOLAR),
+      S("DETUNE",   CC::OSC2_DETUNE,          BIPOLAR),
+      S("SS DET",   CC::SUPERSAW2_DETUNE,     CONT),
+      S("SS MIX",   CC::SUPERSAW2_MIX,        CONT),
+      S("FB AMT",   CC::OSC2_FEEDBACK_AMOUNT, CONT),
+      S("FB MIX",   CC::OSC2_FEEDBACK_MIX,    CONT) },
+    // potsB — Advanced: DC, ring, arbitrary
+    { S("FREQ DC",  CC::OSC2_FREQ_DC,    BIPOLAR),
+      S("SHAPE DC", CC::OSC2_SHAPE_DC,   BIPOLAR),
+      S("RING MIX", CC::RING2_MIX,       CONT),
+      S("ARB BANK", CC::OSC2_ARB_BANK,   CONT),
+      S("ARB IDX",  CC::OSC2_ARB_INDEX,  CONT),
+      N, N, N },
+    // encsA — sub-page selectors only
+    { S("OSC1",  0, SUB_SEL),
+      S("OSC2",  0, SUB_SEL),
+      N, N, N, N, N, N },
+    { N, N, N, N, N, N, N, N }
+};
+
+static const PageMapping kOscSubPages[] = { kOsc1Mapping, kOsc2Mapping };
+
+// =============================================================================
+// Page 2: MIX — Mixer (Green)
+// =============================================================================
+static const PageMapping kMixMapping = {
+    "MIXER", "MIX", PageColour::PC_GREEN,
+    // potsA
+    { S("OSC1 MIX",  CC::OSC1_MIX,  CONT),
+      S("OSC2 MIX",  CC::OSC2_MIX,  CONT),
+      S("SUB MIX",   CC::SUB_MIX,   CONT),
+      S("NOISE MIX", CC::NOISE_MIX, CONT),
+      N, N, N, N },
+    // potsB — empty
+    { N, N, N, N, N, N, N, N },
+    // encsA
+    { S("OSC BALANCE", CC::OSC_MIX_BALANCE,   BIPOLAR),
+      S("CROSS MOD",   CC::OSC_CROSS_MOD_DEPTH, CONT),
+      S("OSC SYNC",    CC::OSC_SYNC_ENABLE,   TOGGLE),
+      N, N, N, N, N },
+    // encsB — empty
+    { N, N, N, N, N, N, N, N }
+};
+
+// =============================================================================
+// Page 3: FLT — Filter (Orange)
+// =============================================================================
+// =============================================================================
+// Page 3: FLT — Filter (Orange) — 2 sub-pages: Core, Multimode
+// =============================================================================
+
+// Sub 0: Core — main filter controls
+static const PageMapping kFltCoreMapping = {
+    "FILTER", "CORE", PageColour::PC_ORANGE,
+    // potsA — core continuous + topology selects
+    { S("CUTOFF",   CC::FILTER_CUTOFF,     CONT),
+      S("RESO",     CC::FILTER_RESONANCE,  CONT),
+      S("ENV AMT",  CC::FILTER_ENV_AMOUNT, BIPOLAR),
+      S("KEY TRK",  CC::FILTER_KEY_TRACK,  BIPOLAR),
+      S("ENGINE",   CC::FILTER_ENGINE,     SELECT),
+      S("MODE",     CC::FILTER_MODE,       SELECT),
+      S("VA TYPE",  CC::VA_FILTER_TYPE,    SELECT),
+      S("OCT CTRL", CC::FILTER_OCTAVE_CONTROL, CONT) },
+    { N, N, N, N, N, N, N, N },
+    // encsA — sub-page selectors only
+    { S("CORE",  0, SUB_SEL),
+      S("MULTI", 0, SUB_SEL),
+      N, N, N, N, N, N },
+    { N, N, N, N, N, N, N, N }
+};
+
+// Sub 1: Multimode / Xpander
+static const PageMapping kFltMultiMapping = {
+    "MULTIMODE", "MULTI", PageColour::PC_ORANGE,
+    // potsA — Xpander and multimode params
+    { S("XP MODE", CC::FILTER_OBXA_XPANDER_MODE, SELECT),
+      S("RES MOD", CC::FILTER_OBXA_RES_MOD_DEPTH, CONT),
+      S("MULTI",   CC::FILTER_OBXA_MULTIMODE,     CONT),
+      N, N, N, N, N },
+    { N, N, N, N, N, N, N, N },
+    // encsA — sub-page selectors only
+    { S("CORE",  0, SUB_SEL),
+      S("MULTI", 0, SUB_SEL),
+      N, N, N, N, N, N },
+    { N, N, N, N, N, N, N, N }
+};
+
+static const PageMapping kFltSubPages[] = { kFltCoreMapping, kFltMultiMapping };
+
+// =============================================================================
+// Page 4: ENV — Envelopes (Red) — 3 sub-pages
+// =============================================================================
+
+// Sub 0: AMP envelope
+static const PageMapping kEnvAmpMapping = {
+    "AMP", "AMP", PageColour::PC_RED,
+    // potsA — ADSR (0–3) + curve controls (4–6)
+    { S("ATTACK",  CC::AMP_ATTACK,  ENV),
+      S("DECAY",   CC::AMP_DECAY,   ENV),
+      S("SUSTAIN", CC::AMP_SUSTAIN,  ENV),
+      S("RELEASE", CC::AMP_RELEASE,  ENV),
+      S("ATK CRV", CC::AMP_ATTACK_CURVE,  CONT),
+      S("DEC CRV", CC::AMP_DECAY_CURVE,   CONT),
+      S("REL CRV", CC::AMP_RELEASE_CURVE, CONT),
+      N },
+    // potsB — empty
+    { N, N, N, N, N, N, N, N },
+    // encsA — sub-page selectors only (curves moved to pots)
+    { S("AMP",     0, SUB_SEL),
+      S("FILT",    0, SUB_SEL),
+      S("PITCH",   0, SUB_SEL),
+      N, N, N, N, N },
+    // encsB — empty
+    { N, N, N, N, N, N, N, N }
+};
+
+// Sub 1: FILTER envelope
+static const PageMapping kEnvFilterMapping = {
+    "FILTER", "FILT", PageColour::PC_GOLD,
+    // potsA — ADSR (0–3) + curve controls (4–6)
+    { S("ATTACK",  CC::FILTER_ENV_ATTACK,  ENV),
+      S("DECAY",   CC::FILTER_ENV_DECAY,   ENV),
+      S("SUSTAIN", CC::FILTER_ENV_SUSTAIN,  ENV),
+      S("RELEASE", CC::FILTER_ENV_RELEASE,  ENV),
+      S("ATK CRV", CC::FILTER_ATTACK_CURVE,  CONT),
+      S("DEC CRV", CC::FILTER_DECAY_CURVE,   CONT),
+      S("REL CRV", CC::FILTER_RELEASE_CURVE, CONT),
+      N },
+    // potsB — empty
+    { N, N, N, N, N, N, N, N },
+    // encsA — sub-page selectors only (curves moved to pots)
+    { S("AMP",     0, SUB_SEL),
+      S("FILT",    0, SUB_SEL),
+      S("PITCH",   0, SUB_SEL),
+      N, N, N, N, N },
+    { N, N, N, N, N, N, N, N }
+};
+
+// Sub 2: PITCH envelope (CCs 65–69 defined in ParamDefs.h)
+static const PageMapping kEnvPitchMapping = {
+    "PITCH", "PITCH", PageColour::PC_MAGENTA,
+    // potsA — ADSR (0–3) + depth (4) + curves (5–7)
+    { S("ATTACK",  CC::PITCH_ENV_ATTACK,   ENV),
+      S("DECAY",   CC::PITCH_ENV_DECAY,    ENV),
+      S("SUSTAIN", CC::PITCH_ENV_SUSTAIN,  ENV),
+      S("RELEASE", CC::PITCH_ENV_RELEASE,  ENV),
+      S("DEPTH",   CC::PITCH_ENV_DEPTH,       BIPOLAR),
+      S("ATK CRV", CC::PITCH_ATTACK_CURVE,   CONT),
+      S("DEC CRV", CC::PITCH_DECAY_CURVE,    CONT),
+      S("REL CRV", CC::PITCH_RELEASE_CURVE,  CONT) },
+    // potsB — empty
+    { N, N, N, N, N, N, N, N },
+    // encsA — sub-page selectors only (depth + curves moved to pots)
+    { S("AMP",     0, SUB_SEL),
+      S("FILT",    0, SUB_SEL),
+      S("PITCH",   0, SUB_SEL),
+      N, N, N, N, N },
+    // encsB — empty
+    { N, N, N, N, N, N, N, N }
+};
+
+static const PageMapping kEnvSubPages[3] = {
+    kEnvAmpMapping, kEnvFilterMapping, kEnvPitchMapping
+};
+
+// =============================================================================
+// Page 5: LFO (Purple) — 2 sub-pages
+// =============================================================================
+
+// Sub 0: LFO1
+static const PageMapping kLfo1Mapping = {
+    "LFO1", "LFO1", PageColour::PC_PURPLE,
+    // potsA
+    { S("RATE",       CC::LFO1_FREQ,         CONT),
+      S("DEPTH",      CC::LFO1_DEPTH,        CONT),
+      S("DELAY",      CC::LFO1_DELAY,        CONT),
+      S("PITCH DEP",  CC::LFO1_PITCH_DEPTH,  CONT),
+      S("FILT DEP",   CC::LFO1_FILTER_DEPTH, CONT),
+      S("PWM DEP",    CC::LFO1_PWM_DEPTH,    CONT),
+      S("AMP DEP",    CC::LFO1_AMP_DEPTH,    CONT),
+      N },
+    { N, N, N, N, N, N, N, N },
+    // encsA
+    { S("LFO1",     0, SUB_SEL),
+      S("LFO2",     0, SUB_SEL),
+      S("WAVEFORM",  CC::LFO1_WAVEFORM,    SELECT),
+      S("DEST",      CC::LFO1_DESTINATION, SELECT),
+      S("SYNC",      CC::LFO1_TIMING_MODE, SELECT),
+      N, N, N },
+    { N, N, N, N, N, N, N, N }
+};
+
+// Sub 1: LFO2
+static const PageMapping kLfo2Mapping = {
+    "LFO2", "LFO2", PageColour::PC_INDIGO,
+    { S("RATE",       CC::LFO2_FREQ,         CONT),
+      S("DEPTH",      CC::LFO2_DEPTH,        CONT),
+      S("DELAY",      CC::LFO2_DELAY,        CONT),
+      S("PITCH DEP",  CC::LFO2_PITCH_DEPTH,  CONT),
+      S("FILT DEP",   CC::LFO2_FILTER_DEPTH, CONT),
+      S("PWM DEP",    CC::LFO2_PWM_DEPTH,    CONT),
+      S("AMP DEP",    CC::LFO2_AMP_DEPTH,    CONT),
+      N },
+    { N, N, N, N, N, N, N, N },
+    { S("LFO1",     0, SUB_SEL),
+      S("LFO2",     0, SUB_SEL),
+      S("WAVEFORM",  CC::LFO2_WAVEFORM,    SELECT),
+      S("DEST",      CC::LFO2_DESTINATION, SELECT),
+      S("SYNC",      CC::LFO2_TIMING_MODE, SELECT),
+      N, N, N },
+    { N, N, N, N, N, N, N, N }
+};
+
+static const PageMapping kLfoSubPages[2] = {
+    kLfo1Mapping, kLfo2Mapping
+};
+
+// =============================================================================
+// Page 6: FX (Teal) — 2 sub-pages
+// =============================================================================
+
+// Sub 0: EFFECTS
+static const PageMapping kFxEffectsMapping = {
+    "EFFECTS", "FX", PageColour::PC_TEAL,
+    // potsA
+    { S("MOD MIX",  CC::FX_MOD_MIX,             CONT),
+      S("MOD RATE", CC::FX_MOD_RATE,             CONT),
+      S("MOD FB",   CC::FX_MOD_FEEDBACK,         CONT),
+      S("DLY TIME", CC::FX_JPFX_DELAY_TIME,      CONT),
+      S("DLY MIX",  CC::FX_JPFX_DELAY_MIX,       CONT),
+      S("DLY FB",   CC::FX_JPFX_DELAY_FEEDBACK,   CONT),
+      S("DRY MIX",  CC::FX_DRY_MIX,              CONT),
+      S("JPFX MIX", CC::FX_JPFX_MIX,             CONT) },
+    { N, N, N, N, N, N, N, N },
+    // encsA
+    { S("FX",       0, SUB_SEL),
+      S("REVERB",   0, SUB_SEL),
+      S("MOD TYPE", CC::FX_MOD_EFFECT,           SELECT),
+      S("DLY TYPE", CC::FX_JPFX_DELAY_EFFECT,    SELECT),
+      S("DRIVE",    CC::FX_DRIVE,                SELECT),
+      S("DLY SYNC", CC::DELAY_TIMING_MODE,       SELECT),
+      S("BASS",     CC::FX_BASS_GAIN,            BIPOLAR),
+      S("TREBLE",   CC::FX_TREBLE_GAIN,          BIPOLAR) },
+    { N, N, N, N, N, N, N, N }
+};
+
+// Sub 1: REVERB (Global FX scope — shared across layers)
+static const PageMapping kFxReverbMapping = {
+    "REVERB", "REV", PageColour::PC_SILVER,
+    // potsA
+    { S("SIZE",     CC::FX_REVERB_SIZE,    CONT),
+      S("HI DAMP",  CC::FX_REVERB_DAMP,    CONT),
+      S("LO DAMP",  CC::FX_REVERB_LODAMP,  CONT),
+      S("MIX",      CC::FX_REVERB_MIX,     CONT),
+      S("SHIMMER",  CC::FX_REVERB_SHIMMER, CONT),
+      S("LO PASS",  CC::FX_REVERB_LOWPASS, CONT),
+      S("HI PASS",  CC::FX_REVERB_HIPASS,  CONT),
+      N },
+    { N, N, N, N, N, N, N, N },
+    // encsA
+    { S("FX",      0, SUB_SEL),
+      S("REVERB",  0, SUB_SEL),
+      S("BYPASS",  CC::FX_REVERB_BYPASS, TOGGLE),
+      S("FREEZE",  CC::FX_REVERB_FREEZE, TOGGLE),
+      N, N, N, N },
+    { N, N, N, N, N, N, N, N }
+};
+
+static const PageMapping kFxSubPages[2] = {
+    kFxEffectsMapping, kFxReverbMapping
+};
+
+// =============================================================================
+// Page 7: SEQ — Step Sequencer (Pink)
+// =============================================================================
+static const PageMapping kSeqMapping = {
+    "SEQUENCER", "SEQ", PageColour::PC_PINK,
+    // potsA — Steps 1–8 (all use CC::SEQ_STEP_VALUE with step addressing)
+    { S("STEP 1", CC::SEQ_STEP_VALUE, STEP_VAL),
+      S("STEP 2", CC::SEQ_STEP_VALUE, STEP_VAL),
+      S("STEP 3", CC::SEQ_STEP_VALUE, STEP_VAL),
+      S("STEP 4", CC::SEQ_STEP_VALUE, STEP_VAL),
+      S("STEP 5", CC::SEQ_STEP_VALUE, STEP_VAL),
+      S("STEP 6", CC::SEQ_STEP_VALUE, STEP_VAL),
+      S("STEP 7", CC::SEQ_STEP_VALUE, STEP_VAL),
+      S("STEP 8", CC::SEQ_STEP_VALUE, STEP_VAL) },
+    // potsB — Steps 9–16
+    { S("STEP 9",  CC::SEQ_STEP_VALUE, STEP_VAL),
+      S("STEP 10", CC::SEQ_STEP_VALUE, STEP_VAL),
+      S("STEP 11", CC::SEQ_STEP_VALUE, STEP_VAL),
+      S("STEP 12", CC::SEQ_STEP_VALUE, STEP_VAL),
+      S("STEP 13", CC::SEQ_STEP_VALUE, STEP_VAL),
+      S("STEP 14", CC::SEQ_STEP_VALUE, STEP_VAL),
+      S("STEP 15", CC::SEQ_STEP_VALUE, STEP_VAL),
+      S("STEP 16", CC::SEQ_STEP_VALUE, STEP_VAL) },
+    // encsA — Settings
+    { S("ENABLE",    CC::SEQ_ENABLE,      TOGGLE),
+      S("DIRECTION", CC::SEQ_DIRECTION,   SELECT),
+      S("DEST",      CC::SEQ_DESTINATION, SELECT),
+      S("SYNC",      CC::SEQ_TIMING_MODE, SELECT),
+      S("RETRIGGER", CC::SEQ_RETRIGGER,   TOGGLE),
+      S("DEPTH",     CC::SEQ_DEPTH,       BIPOLAR),
+      N, N },
+    // encsB — Continuous Settings
+    { S("STEPS",  CC::SEQ_STEPS,       CONT),
+      S("GATE",   CC::SEQ_GATE_LENGTH, CONT),
+      S("SLIDE",  CC::SEQ_SLIDE,       CONT),
+      S("RATE",   CC::SEQ_RATE,        CONT),
+      N, N, N, N }
+};
+
+// =============================================================================
+// Page 8: PERF — Performance (Amber)
+// =============================================================================
+// =============================================================================
+// Page 8: PERF — Performance (Amber)
+// =============================================================================
+// Scene A pots: main performance params (glide, voice, bend, level, bpm)
+// Scene B pots: velocity sensitivity (set-per-patch, less frequently tweaked)
+// Encoders: mode selectors (always accessible regardless of pot scene)
+static const PageMapping kPerfMapping = {
+    "PERFORMANCE", "PERF", PageColour::PC_AMBER,
+    // potsA — Performance (Scene A)
+    { S("GLIDE TIME", CC::GLIDE_TIME,          CONT),
+      S("UNI DETUNE", CC::UNISON_DETUNE,       CONT),
+      S("BEND RANGE", CC::PITCH_BEND_RANGE,    CONT),
+      S("AMP LEVEL",  CC::AMP_MOD_FIXED_LEVEL, CONT),
+      S("BPM",        CC::BPM_INTERNAL_TEMPO,  CONT),
+      N, N, N },
+    // potsB — Settings (Scene B): velocity, voice split, MIDI channels
+    { S("VEL AMP",    CC::VELOCITY_AMP_SENS,    CONT),
+      S("VEL FILT",   CC::VELOCITY_FILTER_SENS, CONT),
+      S("VEL ENV",    CC::VELOCITY_ENV_SENS,    CONT),
+      S("VOICES",     CC::PERF_VOICE_SPLIT,     CONT),
+      S("SPLIT PT",   CC::PERF_SPLIT_NOTE,      CONT),
+      S("BALANCE",    CC::PERF_BALANCE,          BIPOLAR),
+      S("MIDI CH A",  CC::PERF_MIDI_CHANNEL_A,  CONT),
+      S("MIDI CH B",  CC::PERF_MIDI_CHANNEL_B,  CONT) },
+    // encsA — Mode selectors (fill empty pot cells on both scenes)
+    { S("GLIDE ON",    CC::GLIDE_ENABLE,     TOGGLE),
+      S("POLY MODE",   CC::POLY_MODE,        SELECT),
+      S("CLK SRC",     CC::BPM_CLOCK_SOURCE, SELECT),
+      S("PERF MODE",   CC::PERF_MODE,        SELECT),
+      S("EDIT TARGET", CC::PERF_EDIT_TARGET, SELECT),
+      N, N, N },
+    { N, N, N, N, N, N, N, N }
+};
+
+// =============================================================================
+// PTCH — Patch Manager (long-press ANY ByteButton to open, from any page)
+// =============================================================================
+// No pots used — potsA/potsB are intentionally all N. The four actions live
+// on dedicated encoders rather than one multi-mode encoder, matching the
+// existing PERF-style "one control, one job" convention used elsewhere in
+// this file:
+//
+//   encsA[0]  SCROLL  — rotate only, moves the highlighted slot up/down the
+//                        browse list. Push is a no-op (PatchManager ignores
+//                        isPush==true for this encoder index).
+//   encsA[1]  LOAD    — push loads the highlighted slot. Non-destructive,
+//                        so no confirmation step. Rotation ignored.
+//   encsA[2]  SAVE    — push arms a save; a second push within
+//                        Config::PTCH_SAVE_ARM_MS commits it. Destructive,
+//                        so it always requires the explicit two-step
+//                        confirm per the project's standing rule on
+//                        confirming before changing stored data. Rotation
+//                        ignored.
+//   encsA[3]  IMPORT  — push opens the SYX import picker. STUBBED this
+//                        pass — PatchManager shows a "COMING SOON" banner
+//                        instead of importing. Rotation ignored.
+//
+// DisplayRenderer never reads slot.cc for ACTION types (there's nothing to
+// show as a CC value) — it routes PTCH through its own drawPatchPage(),
+// same pattern as the ENV/SEQ custom pages.
+// =============================================================================
+static const PageMapping kPtchMapping = {
+    "PATCH MANAGER", "PTCH", PageColour::PC_SLATE,
+    // potsA — unused
+    { N, N, N, N, N, N, N, N },
+    // potsB — unused
+    { N, N, N, N, N, N, N, N },
+    // encsA — the four PTCH actions
+    { S("SCROLL", 0, ACTION),
+      S("LOAD",   0, ACTION),
+      S("SAVE",   0, ACTION),
+      S("IMPORT", 0, ACTION),
+      S("RENAME", 0, ACTION),     // encoder 4 — push opens the name editor
+      N, N, N },
+    // encsB — unused (no scene-B variant for PTCH)
+    { N, N, N, N, N, N, N, N }
+};
+
+// =============================================================================
+// Lookup helpers — PageManager uses these to get the active mapping
+// =============================================================================
+
+// Returns true if the given page has sub-pages
+inline bool hasSubPages(PageID page) {
+    return page == PageID::OSC || page == PageID::FLT
+        || page == PageID::ENV || page == PageID::LFO || page == PageID::FX;
+}
+
+// Returns the sub-page count for pages that have them (0 otherwise)
+inline uint8_t subPageCount(PageID page) {
+    switch (page) {
+        case PageID::OSC: return 2;
+        case PageID::FLT: return 2;
+        case PageID::ENV: return 3;
+        case PageID::LFO: return 2;
+        case PageID::FX:  return 2;
+        default:          return 0;
+    }
+}
+
+// Returns the mapping for a flat page (no sub-pages)
+inline const PageMapping& getFlatMapping(PageID page) {
+    switch (page) {
+        case PageID::MIX:  return kMixMapping;
+        case PageID::SEQ:  return kSeqMapping;
+        case PageID::PERF: return kPerfMapping;
+        case PageID::PTCH: return kPtchMapping;
+        default:           return kHomeMapping;
+    }
+}
+
+// Returns the mapping for a sub-page (page must have sub-pages)
+inline const PageMapping& getSubMapping(PageID page, uint8_t subIdx) {
+    switch (page) {
+        case PageID::OSC: return kOscSubPages[subIdx < 2 ? subIdx : 0];
+        case PageID::FLT: return kFltSubPages[subIdx < 2 ? subIdx : 0];
+        case PageID::ENV: return kEnvSubPages[subIdx < 3 ? subIdx : 0];
+        case PageID::LFO: return kLfoSubPages[subIdx < 2 ? subIdx : 0];
+        case PageID::FX:  return kFxSubPages[subIdx < 2 ? subIdx : 0];
+        default:          return kHomeMapping;
+    }
+}
+
+// Returns the active mapping for any page/sub combination
+inline const PageMapping& getMapping(PageID page, uint8_t subIdx = 0) {
+    if (page == PageID::HOME) return kHomeMapping;
+    if (hasSubPages(page))    return getSubMapping(page, subIdx);
+    return getFlatMapping(page);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Parent page-tab identity — single source of truth for the 8 top/bottom tabs.
+//
+// WHY THIS EXISTS: sub-paged pages (OSC/FLT/ENV/LFO/FX) have no parent
+// PageMapping of their own — only an array of sub-page mappings, each with its
+// OWN tab/name (e.g. "OSC1", "CORE", "AMP", "LFO1"). Reading getMapping(pid,0)
+// for a tab label therefore shows the FIRST SUB-PAGE's label, and the label
+// would change as you switch sub-pages. The tab bar wants the stable PARENT
+// label instead. These tables provide exactly that, keyed by PageID, so the
+// top/bottom tabs always read "OSC", "FLT", "ENV", "LFO", "FX" regardless of
+// the active sub-page. Flat pages (MIX/SEQ/PERF) just echo their own mapping.
+// ─────────────────────────────────────────────────────────────────────────────
+struct PageTabInfo {
+    const char* tab;        // short label shown on an inactive tab
+    const char* name;       // full name shown on the active tab
+    uint32_t    ledColour;  // tab colour (RGB 0xRRGGBB)
+};
+
+// Indexed by PageID value 1..8 (OSC..PERF). Index 0 (HOME) and 9 (PTCH) are
+// present for safety but never drawn as page tabs.
+static constexpr PageTabInfo kPageTabs[] = {
+    /* 0 HOME */ { "HOME", "HOME",        PageColour::PC_ORANGE },
+    /* 1 OSC  */ { "OSC",  "OSCILLATORS", PageColour::PC_CYAN   },
+    /* 2 MIX  */ { "MIX",  "MIXER",       PageColour::PC_GREEN  },
+    /* 3 FLT  */ { "FLT",  "FILTER",      PageColour::PC_ORANGE },
+    /* 4 ENV  */ { "ENV",  "ENVELOPES",   PageColour::PC_RED    },
+    /* 5 LFO  */ { "LFO",  "LFO",         PageColour::PC_PURPLE },
+    /* 6 FX   */ { "FX",   "EFFECTS",     PageColour::PC_TEAL   },
+    /* 7 SEQ  */ { "SEQ",  "SEQUENCER",   PageColour::PC_PINK   },
+    /* 8 PERF */ { "PERF", "PERFORMANCE", PageColour::PC_AMBER  },
+    /* 9 PTCH */ { "PTCH", "PATCH MGR",   PageColour::PC_SLATE  },
+};
+
+// Look up the parent tab identity for any page. Bounds-checked → HOME on
+// an out-of-range id (cannot happen for the 8 drawn tabs, but defensive).
+inline const PageTabInfo& pageTabInfo(PageID page) {
+    const uint8_t idx = static_cast<uint8_t>(page);
+    constexpr uint8_t kCount = sizeof(kPageTabs) / sizeof(kPageTabs[0]);
+    return (idx < kCount) ? kPageTabs[idx] : kPageTabs[0];
+}
+
+// Clean up macros — not needed outside this header
+#undef S
+#undef N
+
+} // namespace PageMap

@@ -56,6 +56,30 @@ static constexpr uint8_t  TCA_ADDR      = 0x20;
 static constexpr uint8_t  TCA_RST_PIN   = 1;    // expander pin driving LCD reset
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Touch — FT6336 capacitive controller (Waveshare ESP32-S3-Touch-LCD-3.5)
+// ─────────────────────────────────────────────────────────────────────────────
+// The FT6336 sits on the SAME I2C bus as the M5 units + TCA9554 (SDA=8/SCL=7).
+// Default 7-bit address is 0x38. It is polled, not read every loop: a gate
+// (TOUCH_POLL_MS) limits how often the touch-data block is read, so an idle
+// screen generates no extra bus traffic competing with pot/encoder reads.
+static constexpr uint8_t  TOUCH_ADDR     = 0x38;
+// Poll cadence. ~30 ms (≈33 Hz) is far faster than any human tap and matches
+// the display frame gate, so taps feel instant without saturating the 50 kHz
+// bus. Raise to reduce bus load further; lower only if taps feel laggy.
+static constexpr uint32_t TOUCH_POLL_MS  = 30;
+// Optional touch interrupt (INT/IRQ) pin. -1 = disabled → pure gated polling
+// (no extra wiring required, always works). If your board breaks out the touch
+// INT line, set this to its GPIO: poll() will then skip the I2C read entirely
+// unless INT is asserted, dropping idle bus cost to ~zero. Code path is the
+// same either way — only this constant changes.
+static constexpr int8_t   TOUCH_INT_PIN  = -1;
+// Native panel dimensions the FT6336 reports coordinates in (portrait), used
+// by the rotation transform in TouchInput. Must match the ST7796 native size,
+// NOT the rotated landscape size. DISP_WIDTH/HEIGHT above are already native.
+static constexpr uint16_t TOUCH_NATIVE_W = DISP_WIDTH;   // 320
+static constexpr uint16_t TOUCH_NATIVE_H = DISP_HEIGHT;  // 480
+
+// ─────────────────────────────────────────────────────────────────────────────
 // I2C device addresses — M5 units
 // ─────────────────────────────────────────────────────────────────────────────
 static constexpr uint8_t  ADDR_ANGLE8   = 0x43;

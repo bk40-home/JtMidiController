@@ -56,6 +56,7 @@
 #include "PageManager.h"
 #include "LedManager.h"
 #include "DisplayRenderer.h"
+#include "TouchInput.h"
 
 // Patches
 #include "PatchStore.h"
@@ -64,6 +65,8 @@
 // Performance monitor
 #include "PerfMonitor.h"
 
+#include "NameEditor.h"
+
 // ── Global instances ────────────────────────────────────────────────────────
 
 static Angle8Unit      angle;
@@ -71,6 +74,8 @@ static Encoder8Unit    encoder;
 static ByteButtonUnit  buttons;
 static UartMidi        uartMidi;
 static Adafruit_USBD_MIDI usbMidiTransport;
+static TouchInput      touch;
+static NameEditor      nameEditor;
 
 MIDI_CREATE_INSTANCE(Adafruit_USBD_MIDI, usbMidiTransport, USBMIDI);
 
@@ -79,6 +84,11 @@ static LedManager      leds;
 static DisplayRenderer display;
 static PatchStore      patchStore;
 static PatchManager    patchManager;
+
+// Encoder driving the name-editor fallback while it's open (rotate = move the
+// grid highlight, push = activate). Index 0 = the PTCH "SCROLL" wheel — the
+// natural navigation encoder. Change freely.
+static constexpr uint8_t ENC_EDITOR = 0;
 
 // ── Timing gates ────────────────────────────────────────────────────────────
 static uint32_t lastDisplayMs = 0;
@@ -188,6 +198,12 @@ void setup() {
         Serial.println("[BYTEBTN] NOT FOUND");
     }
 
+    if (touch.begin(&Wire)) {
+        Serial.printf("[TOUCH]   Found @ 0x%02X\n", Config::TOUCH_ADDR);
+    } else {
+        Serial.println("[TOUCH]   NOT FOUND");
+    }
+
     // ── 5. UART MIDI ────────────────────────────────────────────────────
     #if JT_ENABLE_UART_MIDI
     uartMidi.begin();
@@ -212,6 +228,7 @@ void setup() {
     // hold a reference to) and after patchStore.begin() (needs LittleFS
     // already mounted so the slot-0 name lookup in begin() is valid).
     patchManager.begin(patchStore, pages, onSendCC);
+    patchManager.setNameEditor(nameEditor);
 
     // ── 8. Initial display ──────────────────────────────────────────────
     if (display.isReady()) {
@@ -239,10 +256,81 @@ void loop() {
 
     PerfMonitor::loopBegin();           // ← add as first line
 
+    // ── 0. Name editor (modal) — owns input + display while open ────────
+    if (nameEditor.isActive()) {
+        // Touch drives the editor.
+        touch.poll();
+        if (touch.tapped()) {
+            NameEditor::Action a =
+                nameEditor.handleTouch(touch.tapX(), touch.tapY());
+            touch.clearTap();
+            if      (a == NameEditor::Action::COMMIT) patchManager.commitNameEdit();
+            else if (a == NameEditor::Action::CANCEL) nameEditor.close();
+        }
+
+        // Encoder fallback (index ENC_EDITOR): rotate = move, push = select.
+        encoder.poll();
+        const int32_t d    = encoder.delta(ENC_EDITOR);
+        const bool    push = encoder.pressed(ENC_EDITOR);
+        if (push) encoder.clearPress(ENC_EDITOR);
+        if (d != 0 || push) {
+            NameEditor::Action a = nameEditor.handleEncoder(d, push);
+            if      (a == NameEditor::Action::COMMIT) patchManager.commitNameEdit();
+            else if (a == NameEditor::Action::CANCEL) nameEditor.close();
+        }
+
+        // Draw the overlay (rate-limited like the normal display block).
+        if (now - lastDisplayMs >= Config::DISPLAY_FRAME_MS) {
+            lastDisplayMs = now;
+            if (display.isReady()) nameEditor.draw(display.gfx());
+        }
+
+        // When the editor just closed, force one full page redraw so the
+        // underlying page (e.g. the PTCH list) reappears — closing doesn't
+        // change page/sub/scene, so the normal redraw trigger won't fire.
+        if (!nameEditor.isActive()) {
+            prevPage = PageID::COUNT;   // sentinel ≠ any real page → forces redraw
+        }
+
+        PerfMonitor::loopEnd();
+        return;  // skip normal processing while editing
+    }
+
     // ── 1. Poll all hardware (every loop) ───────────────────────────────
     angle.poll();
     encoder.poll();
     buttons.poll();
+    touch.poll();
+    {
+        const PageID pg     = pages.currentPage();
+        const bool   hasSub = PageMap::hasSubPages(pg);
+        const uint8_t subN  = PageMap::subPageCount(pg);
+
+        // Tap edge: tabs first (work on every page); then PTCH rename-on-tap.
+        if (touch.tapped()) {
+            const uint16_t tx = touch.tapX();
+            const uint16_t ty = touch.tapY();
+
+            const TabHit hit = DisplayRenderer::hitTestTab(tx, ty, hasSub, subN);
+            if (hit.kind == TabKind::PAGE) {
+                pages.selectPage(static_cast<PageID>(hit.index + 1));
+            } else if (hit.kind == TabKind::SUBTAB) {
+                pages.selectSubPage(hit.index);
+            } else if (pg == PageID::PTCH && ty >= 28 && ty < 292) {
+                // Tap the PTCH list area (below header, above footer) opens the
+                // rename editor for the highlighted slot. Encoder 4 also opens
+                // it (wired inside PatchManager::onAction).
+                patchManager.openRenameHighlighted();
+            }
+            touch.clearTap();
+        }
+
+        // Content-cell drag-edit, every frame from the live touch state. The
+        // handler ignores ENV/SEQ/PTCH/HOME itself, so this is safe on any page.
+        const uint8_t cell =
+            DisplayRenderer::hitTestCell(touch.x(), touch.y(), hasSub);
+        pages.handleContentTouch(cell, touch.y(), touch.touched());
+    }
 
     // ── 2. Poll incoming MIDI (every loop) ──────────────────────────────
     #if JT_ENABLE_UART_MIDI
@@ -328,4 +416,4 @@ void loop() {
                       pages.activeMapping().tab, pages.currentSubPage());
     }
     PerfMonitor::loopEnd();             // ← add as last line
-    }
+}

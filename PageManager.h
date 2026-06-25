@@ -100,6 +100,34 @@ public:
     // could also reach it without duplicating the page-switch logic.
     void openPatchManager();
 
+    // ── Touch navigation (Phase 1b) ─────────────────────────────────────────
+    // Switch to a page (OSC..PERF). Shared by ByteButton short-press and touch
+    // tab taps so both drive identical behaviour (re-select closes to HOME).
+    // PTCH is not reachable here by design — long-press only.
+    void selectPage(PageID target);
+
+    // Select a sub-page by index on the current page. Used by touch sub-tab
+    // taps; the encoder SUB_SEL path uses the same underlying logic. No-op if
+    // the current page has no sub-pages or the index is out of range.
+    void selectSubPage(uint8_t subIdx) { handleSubPageSelect(subIdx); }
+
+    // ── Touch-to-edit parameter cells (Phase 2) ─────────────────────────────
+    // Called every loop with the live touch state for the content grid.
+    //   cellIdx : grid cell under the finger at PRESS time (0..7), or
+    //             DisplayRenderer::kNoCell. Only read on the press edge; once a
+    //             cell is grabbed, the edit sticks to it until release even if
+    //             the finger drifts to another cell.
+    //   curY    : current finger Y (landscape px), used for drag delta.
+    //   touched : whether a finger is currently down.
+    // Drag up increases value, down decreases (CONT/ENV/BIPOLAR/SELECT via the
+    // shared applyEncoderDelta path). A TOGGLE flips on a tap-release that
+    // never exceeded the drag threshold. Emits the same CCs as the encoders.
+    void handleContentTouch(uint8_t cellIdx, uint16_t curY, bool touched);
+
+    // Which cell (0..7) currently has the touch-edit focus, or kNoCell. The
+    // renderer reads this to highlight the focused cell. Public, const.
+    uint8_t editCell() const { return editCell_; }
+
 private:
     PageID       page_     = PageID::HOME;
     uint8_t      subPage_  = 0;
@@ -135,6 +163,27 @@ private:
     void handlePots(Angle8Unit& angle);
     void handleEncoders(Encoder8Unit& encoder);
     void handleSubPageSelect(uint8_t encIdx);
+
+    // ── Touch-edit state (Phase 2) ──────────────────────────────────────────
+    // editCell_ is the grabbed cell (0..7) or kNoCell when idle. The drag
+    // baseline (start Y + value at grab) lets us compute an absolute delta each
+    // frame rather than accumulating rounding error. editMoved_ distinguishes a
+    // value drag from a tap (TOGGLE flips only on a tap that never moved).
+    static constexpr uint8_t kNoCell = 0xFF;
+    uint8_t  editCell_     = kNoCell;
+    uint16_t editStartY_   = 0;
+    uint8_t  editStartVal_ = 0;
+    bool     editMoved_    = false;
+    bool     editPrevTouch_ = false;  // touch state last frame (edge detect)
+
+    // Resolve which ControlSlot a grid cell (0..7) currently shows, mirroring
+    // the pot-then-encoder fill order used by drawPage()/refreshValues(). Sets
+    // outIsEncoder for callers that care. Returns nullptr for an empty cell.
+    const ControlSlot* slotForCell(uint8_t cellIdx, bool& outIsEncoder) const;
+
+    // Apply a touch drag to the grabbed cell's slot, given the current finger
+    // Y. Converts travel → value delta and routes through applyEncoderDelta.
+    void applyTouchDrag(const ControlSlot& slot, uint16_t curY);
 
     // Apply an encoder delta to a CC value based on control type
     void applyEncoderDelta(const ControlSlot& slot, int32_t delta);

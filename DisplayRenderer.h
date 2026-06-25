@@ -130,6 +130,21 @@ struct SeqParams {
     bool operator!=(const SeqParams& o) const { return !(*this == o); }
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// TabHit — result of a touch hit-test against the tab bars.
+//   kind  : which region was hit (a page tab, a sub-page tab, or nothing)
+//   index : PAGE   → 0..7, mapping to PageID OSC..PERF via (index + 1)
+//           SUBTAB → 0-based sub-page index on the current page
+// Returned by DisplayRenderer::hitTestTab() and consumed by
+// PageManager::handleTouch(). Kept here (not in PageManager) so the tab
+// geometry has a single owner: the renderer that draws the tabs.
+// ─────────────────────────────────────────────────────────────────────────────
+enum class TabKind : uint8_t { NONE, PAGE, SUBTAB };
+struct TabHit {
+    TabKind kind  = TabKind::NONE;
+    uint8_t index = 0;
+};
+
 class DisplayRenderer {
 public:
     DisplayRenderer() : tca_(Config::TCA_ADDR) {};
@@ -159,6 +174,22 @@ public:
     // Update header info (voice count, preset name, etc.)
     void updateHeader(const PageManager& pages);
 
+    // ── Touch hit-testing ─────────────────────────────────────────────────
+    // Map a tap coordinate (landscape 480×320, matching TouchInput's output)
+    // to a tab region. Pure geometry — no drawing, no state. The caller passes
+    // whether the current page has sub-pages and how many, so the sub-tab
+    // strip is only tested when it's actually on screen. Returns kind=NONE for
+    // taps that miss every tab (content area, scene indicator zone, gaps).
+    static TabHit hitTestTab(uint16_t x, uint16_t y,
+                             bool pageHasSub, uint8_t subCount);
+
+    // Map a tap coordinate to a parameter-grid cell index (0..7), or 0xFF if
+    // the tap is outside the grid (header, footer, sub-tab strip). pageHasSub
+    // selects the correct content-top offset and cell height so it agrees with
+    // the param-grid renderer. Used by tap-to-edit (Phase 2).
+    static constexpr uint8_t kNoCell = 0xFF;
+    static uint8_t hitTestCell(uint16_t x, uint16_t y, bool pageHasSub);
+
     // ── Display state ───────────────────────────────────────────────────────
     Arduino_GFX* gfx() { return gfx_; }
     bool isReady() const { return ready_; }
@@ -172,6 +203,30 @@ private:
     // ── Normal page cache — per-cell CC values for dirty detection ─────────
     // Tracks whatever is displayed in each cell (pot or encoder value)
     uint8_t prevValues_[8] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
+
+    // Per-frame content-area top. Equals PARAM_AREA_Y on flat pages, or
+    // PARAM_AREA_Y + SUBTAB_H on sub-paged pages (room for the sub-tab strip).
+    // Set at the start of each grid/ENV draw+refresh; the param grid and ENV
+    // curve read this instead of the PARAM_AREA_Y constant so their content
+    // sits below the strip. SEQ/PTCH/HOME never set or read it.
+    uint16_t paramTop_ = PARAM_AREA_Y;
+
+    // Per-frame cell height. PARAM_AREA_H/2 on flat pages; (PARAM_AREA_H -
+    // SUBTAB_H)/2 on sub-paged pages, so the 2-row grid still fits between the
+    // sub-tab strip and the footer. Set alongside paramTop_.
+    uint16_t cellH_ = PARAM_AREA_H / 2;
+
+    // Touch-edit focus highlight tracking (Phase 2). Remembers which cell last
+    // had the focus border so refreshValues() can erase the old border and
+    // draw the new one only when focus moves — no per-frame full redraw.
+    uint8_t prevEditCell_ = 0xFF;  // 0xFF = none drawn
+
+    // Perf-indicator dirty tracking. The header's MODE/target readout must
+    // update when those CCs change even if the page doesn't — refreshValues()
+    // repaints just the indicator when either differs from these caches.
+    // 0xFF = "never drawn", forcing a paint on the first refresh.
+    uint8_t prevPerfMode_   = 0xFF;
+    uint8_t prevEditTarget_ = 0xFF;
 
     // ── ENV page cache — full parameter snapshot for dirty detection ─────────
     EnvParams prevEnv_ = {};
@@ -194,6 +249,29 @@ private:
     static constexpr uint16_t PARAM_AREA_H = SCREEN_H - HEADER_H - FOOTER_H;
     static constexpr uint16_t CELL_W       = SCREEN_W / 4;
     static constexpr uint16_t CELL_H       = PARAM_AREA_H / 2;
+
+    // ── Tab bar geometry (Phase 1b) ─────────────────────────────────────────
+    // The header (top) and footer (bottom) rows double as the two page-tab
+    // rows: OSC/MIX/FLT/ENV on top, LFO/FX/SEQ/PERF on the bottom — so the tab
+    // bar costs ZERO extra vertical space over the original header+footer.
+    // Geometry lives here because the renderer owns it; hitTestTab() and the
+    // draw code share these exact constants (single source of truth).
+    //
+    // Four tabs per row, left-aligned, leaving the top row's right edge free
+    // for the scene indicator. The HIT zone for each tab is the FULL row
+    // height (HEADER_H / FOOTER_H), even though the drawn pill is shorter —
+    // a fingertip lands anywhere in the row, not just on the 22px pill.
+    static constexpr uint16_t TAB_W      = 88;  // drawn + hit width per tab
+    static constexpr uint16_t TAB_PAD_X  = 2;   // left margin of the first tab
+    static constexpr uint16_t TAB_PILL_M = 2;   // pill inset inside the row
+    static constexpr uint8_t  TABS_PER_ROW = 4;
+
+    // Sub-page tab strip — a thin band at the TOP of the content area, shown
+    // only on pages with sub-pages (OSC/FLT/ENV/LFO/FX). Pushes those pages'
+    // content down by SUBTAB_H; flat pages are unaffected.
+    static constexpr uint16_t SUBTAB_Y   = HEADER_H;      // directly below header
+    static constexpr uint16_t SUBTAB_H   = 16;
+    static constexpr uint16_t SUBTAB_W   = 80;            // centred row of tabs
 
     // Envelope curve drawing area — inset from screen edges
     static constexpr uint16_t ENV_PAD_X    = 20;   // left/right margin
@@ -265,6 +343,37 @@ private:
     // ── Normal page rendering ───────────────────────────────────────────────
     void drawHeader(const PageManager& pages);
     void drawFooter(const PageManager& pages);
+    // Tab-bar helpers (Phase 1b). drawPageTab renders one page-tab pill into a
+    // given row; drawSubTabs renders the thin sub-page strip atop the content
+    // area on sub-paged pages. Geometry matches hitTestTab() via the shared
+    // TAB_* / SUBTAB_* constants.
+    void drawPageTab(uint8_t tabIdx, const char* shortLabel,
+                     const char* fullName, uint16_t colour, bool active,
+                     uint16_t rowY, uint16_t rowH);
+    void drawSubTabs(const PageManager& pages);
+
+    // Performance MODE + edit-target readout at the header's right edge.
+    // Replaces the old scene-switch "S:A/B" text. Reads PERF_MODE /
+    // PERF_EDIT_TARGET from the CC cache the synth mirrors.
+    void drawPerfIndicator(const PageManager& pages);
+
+    // Repaint the perf indicator only when MODE/target changed (called from
+    // refreshValues so edit-target switches show without a full page redraw).
+    void refreshPerfIndicator(const PageManager& pages);
+
+    // Draw or erase the touch-edit focus border around a grid cell. `on` true
+    // paints an accent border; false erases it (redraws the cell's border in
+    // the background colour). Cell index 0..7; no-op for kNoCell/0xFF.
+    void drawCellFocus(uint8_t cellIdx, bool on, uint16_t accent);
+
+    // Vertical offset applied to the content area on pages that show the
+    // sub-tab strip (OSC/FLT/ENV/LFO/FX). Returns SUBTAB_H so the param grid
+    // and ENV curve start BELOW the strip; returns 0 on flat pages (SEQ/PTCH/
+    // HOME), which have no strip and must not move. Centralised so the param
+    // grid and ENV renderer agree on where their content begins.
+    static uint16_t contentTopOffset(PageID page) {
+        return PageMap::hasSubPages(page) ? SUBTAB_H : 0;
+    }
     // labelStays = true skips the label paint and only erases / redraws the
     // value-text and bar-gauge regions of the cell. Used by refreshValues()
     // so the static label doesn't flicker on every value change.

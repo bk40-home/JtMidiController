@@ -105,38 +105,32 @@ void PageManager::handlePageButtons(ByteButtonUnit& buttons) {
 
         // ByteSwitch buttons 0..7 map to pages 1..8 (OSC..PERF). PTCH (9) is
         // intentionally unreachable here — long-press only, handled above.
-        const PageID target = static_cast<PageID>(i + 1);
+        selectPage(static_cast<PageID>(i + 1));
 
-        if (page_ == target || page_ == PageID::PTCH) {
-            // Second press on same button, OR any short-press while PTCH is
-            // open, closes back to HOME — same re-press-to-close convention
-            // used by every other page.
-            page_    = PageID::HOME;
-            subPage_ = 0;
-        } else {
-            // Switch to new page
-            page_    = target;
-            subPage_ = 0;  // always start at first sub-page
-        }
-
-        // Page changed — refresh pickup targets for the new mapping
-        refreshPickupTargets();
-
-        Serial.printf("[PAGE] → %s (sub %u)\n",
-                      activeMapping().tab, subPage_);
-
-        // One page action per poll cycle. REQUIRED here (unlike the
-        // original pre-PTCH version of this loop, which had no early exit
-        // but was harmless since page_ == target could only match the one
-        // button for the currently active page): page_ == PageID::PTCH is
-        // true for EVERY button index while PTCH is open, so without this
-        // return, a second pending press in the same poll cycle could
-        // chain PTCH-close and the next page-open together invisibly in
-        // one call — e.g. two quick taps registering in the same poll
-        // would close PTCH AND immediately open the second button's page,
-        // looking like a single transition with no PTCH screen ever shown.
+        // One page action per poll cycle — see selectPage()'s PTCH note for
+        // why this early return matters while PTCH is open.
         return;
     }
+}
+
+// Switch to `target`, applying the shared re-press-to-close convention used by
+// every page-entry path (ByteButtons and now touch tabs). Extracted so touch
+// and buttons drive ONE code path — they can't drift out of sync.
+void PageManager::selectPage(PageID target) {
+    if (page_ == target || page_ == PageID::PTCH) {
+        // Re-selecting the active page, OR any selection while PTCH is open,
+        // closes back to HOME — the same convention every page uses.
+        page_    = PageID::HOME;
+        subPage_ = 0;
+    } else {
+        page_    = target;
+        subPage_ = 0;  // always start at the first sub-page
+    }
+
+    // Page changed — refresh pickup targets for the new mapping.
+    refreshPickupTargets();
+
+    Serial.printf("[PAGE] → %s (sub %u)\n", activeMapping().tab, subPage_);
 }
 
 void PageManager::openPatchManager() {
@@ -263,6 +257,130 @@ void PageManager::handleSubPageSelect(uint8_t encIdx) {
         subPage_ = encIdx;
         refreshPickupTargets();
         Serial.printf("[SUBPAGE] → %s\n", activeMapping().name);
+    }
+}
+
+// ── Touch-to-edit (Phase 2) ─────────────────────────────────────────────────
+
+const ControlSlot* PageManager::slotForCell(uint8_t cellIdx,
+                                             bool& outIsEncoder) const {
+    outIsEncoder = false;
+    if (cellIdx >= 8) return nullptr;
+
+    const PageMapping& map = activeMapping();
+    const ControlSlot* pots = (potScene_ == Scene::A) ? map.potsA : map.potsB;
+    const ControlSlot* encs = (encScene_ == Scene::A) ? map.encsA : map.encsB;
+
+    // Rebuild the SAME encoder queue drawPage()/refreshValues() use so cell
+    // indices line up exactly with what's on screen.
+    uint8_t encQueue[8];
+    uint8_t encCount = 0;
+    for (uint8_t i = 0; i < 8 && encCount < 8; ++i) {
+        if (encs[i].isActive() && !encs[i].isSubSel()) encQueue[encCount++] = i;
+    }
+
+    uint8_t nextEnc = 0;
+    for (uint8_t i = 0; i < 8; ++i) {
+        if (pots[i].isActive()) {
+            if (i == cellIdx) return &pots[i];
+        } else if (nextEnc < encCount) {
+            const ControlSlot& enc = encs[encQueue[nextEnc++]];
+            if (i == cellIdx) { outIsEncoder = true; return &enc; }
+        }
+        // empty cell — nothing placed here
+        if (i == cellIdx) return nullptr;
+    }
+    return nullptr;
+}
+
+void PageManager::applyTouchDrag(const ControlSlot& slot, uint16_t curY) {
+    // ~1 value per 1.5 px (signed-off sensitivity). Up = increase, so the
+    // delta is (startY - curY) because screen Y grows downward. We compute an
+    // ABSOLUTE target from the grab baseline each frame, then emit the change
+    // relative to the current cached value via applyEncoderDelta — this avoids
+    // drift from accumulating per-frame rounding.
+    const int dyPx     = (int)editStartY_ - (int)curY;       // up positive
+    const int valDelta = (dyPx * 2) / 3;                     // 1 / 1.5 px
+
+    if (slot.type == CtrlType::SELECT) {
+        // One option step per ~12 px so discrete options don't blur past.
+        const int step = dyPx / 12;
+        const int target = (int)editStartVal_ + step;  // bucket space, clamped below
+        const int cur = (int)getCCValue(slot.cc);
+        const int d = target - cur;
+        if (d != 0) applyEncoderDelta(slot, d);
+        if (dyPx > 6 || dyPx < -6) editMoved_ = true;
+        return;
+    }
+
+    // CONT / ENV / BIPOLAR: target = grabbed value + travel, clamped 0..127.
+    int target = (int)editStartVal_ + valDelta;
+    if (target < 0)   target = 0;
+    if (target > 127) target = 127;
+    const int cur = (int)getCCValue(slot.cc);
+    const int d = target - cur;
+    if (d != 0) applyEncoderDelta(slot, d);
+    if (dyPx > 4 || dyPx < -4) editMoved_ = true;  // moved past tap threshold
+}
+
+void PageManager::handleContentTouch(uint8_t cellIdx, uint16_t curY,
+                                     bool touched) {
+    // Touch edits only make sense on the normal parameter grid. ENV/SEQ/PTCH/
+    // HOME draw their own content with no editable cells, so ignore them.
+    const bool editablePage = (page_ != PageID::HOME && page_ != PageID::ENV
+                            && page_ != PageID::SEQ  && page_ != PageID::PTCH);
+
+    // ── Press edge: grab the cell under the finger ──────────────────────────
+    if (touched && !editPrevTouch_) {
+        editPrevTouch_ = true;
+        editMoved_     = false;
+        if (editablePage && cellIdx != kNoCell) {
+            bool isEnc = false;
+            const ControlSlot* s = slotForCell(cellIdx, isEnc);
+            if (s && s->isActive()) {
+                editCell_     = cellIdx;
+                editStartY_   = curY;
+                editStartVal_ = getCCValue(s->cc);
+            } else {
+                editCell_ = kNoCell;   // empty/inactive cell — nothing to edit
+            }
+        } else {
+            editCell_ = kNoCell;
+        }
+        return;
+    }
+
+    // ── Held: drag the grabbed cell ─────────────────────────────────────────
+    if (touched && editCell_ != kNoCell) {
+        bool isEnc = false;
+        const ControlSlot* s = slotForCell(editCell_, isEnc);
+        if (s && s->isActive() && s->type != CtrlType::TOGGLE) {
+            applyTouchDrag(*s, curY);
+        } else if (s && s->type == CtrlType::TOGGLE) {
+            // TOGGLE: a drag does nothing; the flip happens on tap-release.
+            if ((int)editStartY_ - (int)curY > 6 ||
+                (int)curY - (int)editStartY_ > 6) {
+                editMoved_ = true;   // moved too far → not a tap, cancel flip
+            }
+        }
+        return;
+    }
+
+    // ── Release edge ────────────────────────────────────────────────────────
+    if (!touched && editPrevTouch_) {
+        editPrevTouch_ = false;
+        if (editCell_ != kNoCell && !editMoved_) {
+            // A tap that never moved. TOGGLE flips; other types do nothing
+            // (their value already changed live during the drag).
+            bool isEnc = false;
+            const ControlSlot* s = slotForCell(editCell_, isEnc);
+            if (s && s->type == CtrlType::TOGGLE) {
+                const uint8_t cur = getCCValue(s->cc);
+                emitCC(s->cc, (cur > 63) ? 0 : 127);
+            }
+        }
+        // Keep editCell_ set so the renderer can show the last-focused cell.
+        // It is re-grabbed or cleared on the next press edge.
     }
 }
 
