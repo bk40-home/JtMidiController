@@ -1,75 +1,82 @@
 // =============================================================================
-// PickupMode.cpp
+// PickupMode.cpp — see PickupMode.h.
 // =============================================================================
 #include "PickupMode.h"
 
-void PickupMode::onPageChange(const uint8_t targets[kNumPots]) {
+#include <math.h>
+
+void PickupMode::onPageChange(const float targets[kNumPots]) {
     for (uint8_t i = 0; i < kNumPots; ++i) {
         targets_[i]     = targets[i];
-        seeking_[i]     = true;     // all pots start seeking on page change
-        seekStarted_[i] = false;    // seekStartCC_ will be latched lazily
-        // seekStartCC_ left stale on purpose — only read after seekStarted_
-        // becomes true, which happens on the next process() call.
+        seeking_[i]     = true;    // every pot re-seeks on a page change
+        seekStarted_[i] = false;   // anchor latched lazily in process()
+        // seekStart_[i] deliberately left stale — it is only read once
+        // seekStarted_[i] is true, which cannot happen before process() sets it.
     }
 }
 
-void PickupMode::setTarget(uint8_t potIdx, uint8_t targetCC) {
+void PickupMode::setTarget(uint8_t potIdx, float target) {
     if (potIdx >= kNumPots) return;
-    targets_[potIdx] = targetCC;
-    // Do not touch seeking_ / seekStarted_ here — the pot may already be
-    // picked up and tracking normally. Only onPageChange resets to seeking.
+    targets_[potIdx] = target;
+    // seeking_/seekStarted_ untouched on purpose: a pot that has already picked
+    // up must keep tracking. Only onPageChange() puts pots back into seeking.
 }
 
-bool PickupMode::process(uint8_t potIdx, uint8_t currentCC) {
+bool PickupMode::process(uint8_t potIdx, float current) {
     if (potIdx >= kNumPots) return false;
 
-    // Already picked up — pass through every value
+    // Already picked up — everything passes through.
     if (!seeking_[potIdx]) return true;
 
-    // First process() call after seeking started: latch the seek-start anchor.
-    // Doing this lazily means onPageChange doesn't need access to the live pot
-    // readings — caller stays simple.
+    // Latch the seek anchor on the first poll after seeking began.
     if (!seekStarted_[potIdx]) {
-        seekStartCC_[potIdx] = currentCC;
+        seekStart_[potIdx]   = current;
         seekStarted_[potIdx] = true;
     }
 
-    // ── Snap on decisive move ───────────────────────────────────────────────
-    // If kSnapCC > 0 and the pot has moved that many units away from where it
-    // was when seeking began, treat that as a deliberate "I want this value
-    // now" gesture and pick up immediately — no need to sweep across the
-    // target value. kSnapCC == 0 disables snap entirely.
-    if (kSnapCC > 0) {
-        const int16_t moved = (int16_t)currentCC - (int16_t)seekStartCC_[potIdx];
-        if (abs(moved) >= (int16_t)kSnapCC) {
+    // ── Snap on a decisive move ─────────────────────────────────────────────
+    // kSnap is constexpr, so when PICKUP_SNAP_CC is 0 the compiler removes this
+    // whole block — no runtime cost for disabling snap.
+    if (kSnap > 0.0f) {
+        if (fabsf(current - seekStart_[potIdx]) >= kSnap) {
             seeking_[potIdx] = false;
             return true;
         }
     }
 
-    // ── Conventional pickup ─────────────────────────────────────────────────
-    // Pot is in the ±kThreshold zone around the target → pick up.
-    const int16_t diff = (int16_t)currentCC - (int16_t)targets_[potIdx];
-    if (abs(diff) <= (int16_t)kThreshold) {
+    // ── Conventional pickup: has the pot reached/crossed the target? ────────
+    if (fabsf(current - targets_[potIdx]) <= kThreshold) {
         seeking_[potIdx] = false;
         return true;
     }
 
-    // Still seeking — suppress this value (no CC output)
-    return false;
+    // Crossing detection. The pot can jump past the target between two polls
+    // without ever landing inside the threshold window (a fast twist moves
+    // several steps per poll). Compare which SIDE of the target the pot was on
+    // at the anchor versus now: a sign change means it crossed.
+    const float wasAbove = seekStart_[potIdx] - targets_[potIdx];
+    const float isAbove  = current            - targets_[potIdx];
+    if ((wasAbove < 0.0f && isAbove > 0.0f) ||
+        (wasAbove > 0.0f && isAbove < 0.0f)) {
+        seeking_[potIdx] = false;
+        return true;
+    }
+
+    return false;   // still seeking — suppress the value
 }
 
 bool PickupMode::isSeeking(uint8_t potIdx) const {
     return (potIdx < kNumPots) ? seeking_[potIdx] : false;
 }
 
-uint8_t PickupMode::targetValue(uint8_t potIdx) const {
-    return (potIdx < kNumPots) ? targets_[potIdx] : 0;
+float PickupMode::targetValue(uint8_t potIdx) const {
+    return (potIdx < kNumPots) ? targets_[potIdx] : 0.0f;
 }
 
-int8_t PickupMode::seekDirection(uint8_t potIdx, uint8_t currentCC) const {
-    if (potIdx >= kNumPots || !seeking_[potIdx]) return 0;
-    if (currentCC < targets_[potIdx]) return +1;  // need to turn up
-    if (currentCC > targets_[potIdx]) return -1;  // need to turn down
+int8_t PickupMode::seekDirection(uint8_t potIdx, float current) const {
+    if (potIdx >= kNumPots) return 0;
+    const float diff = targets_[potIdx] - current;
+    if (diff >  kThreshold) return  1;   // turn up
+    if (diff < -kThreshold) return -1;   // turn down
     return 0;
 }

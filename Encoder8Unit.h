@@ -7,10 +7,12 @@
 //   - Scene switch state
 //
 // DELTA TRACKING:
-//   The M5 library returns cumulative encoder counts. We compute the delta
-//   per poll() call so the PageManager gets signed steps (+CW, -CCW) that
-//   it can apply to CC values. The absolute position is irrelevant — only
-//   movement matters.
+//   The M5 library returns cumulative encoder counts; the hardware advances
+//   that count by TWO per physical detent. poll() divides raw movement by
+//   Config::ENC_COUNTS_PER_DETENT so delta() is signed DETENTS (+CW, -CCW),
+//   carrying the remainder across polls so a poll that lands mid-detent
+//   loses nothing. The absolute position is irrelevant — only movement
+//   matters.
 //
 // BUTTON EDGES:
 //   Raw button state is level (true = currently pressed). We detect rising
@@ -58,6 +60,8 @@ public:
 private:
     UNIT_8ENCODER dev_;
     int32_t  prevCounts_[kNumEncoders] = {};  // previous cumulative count
+    int32_t  residual_[kNumEncoders]   = {};  // sub-detent counts carried over
+    bool     seeded_ = false;   // first poll seeds baselines, latches nothing
     int32_t  deltas_[kNumEncoders]     = {};  // per-poll delta
     bool     btnCurrent_[kNumEncoders] = {};  // current button level
     bool     btnPrev_[kNumEncoders]    = {};  // previous button level

@@ -25,11 +25,32 @@ bool Encoder8Unit::begin(TwoWire* wire) {
 void Encoder8Unit::poll() {
     if (!present_) return;
 
+    // First poll is a BASELINE, not an event source. The prev arrays default
+    // to zero/false, so whatever the very first I2C read returns — including
+    // a not-yet-ready device reporting every button down — would register as
+    // eight simultaneous rising edges and latch eight phantom presses. That
+    // was the "popup opens itself at startup" defect: the phantom press on
+    // the encoder bound to OSC1 PITCH OFFSET opened its option list.
+    if (!seeded_) {
+        for (uint8_t i = 0; i < kNumEncoders; ++i) {
+            prevCounts_[i] = dev_.getEncoderValue(i);
+            btnPrev_[i]    = dev_.getButtonStatus(i);
+        }
+        switch_ = dev_.getSwitchStatus();
+        seeded_ = true;
+        return;
+    }
+
     for (uint8_t i = 0; i < kNumEncoders; ++i) {
         // ── Rotation delta ──────────────────────────────────────────────
+        // The counter moves 2 per detent. Divide with remainder CARRY —
+        // truncation toward zero works for both directions, and the leftover
+        // count persists so two half-detent polls still add up to one step.
         const int32_t current = dev_.getEncoderValue(i);
-        deltas_[i]     = current - prevCounts_[i];
+        residual_[i]  += current - prevCounts_[i];
         prevCounts_[i] = current;
+        deltas_[i]     = residual_[i] / Config::ENC_COUNTS_PER_DETENT;
+        residual_[i]  -= deltas_[i] * Config::ENC_COUNTS_PER_DETENT;
 
         // ── Button edge detection ───────────────────────────────────────
         btnCurrent_[i] = dev_.getButtonStatus(i);

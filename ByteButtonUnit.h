@@ -55,6 +55,7 @@ public:
     // Current level (true = physically held down)
     bool buttonHeld(uint8_t i) const;
 
+
     // ── Long-press detection ────────────────────────────────────────────────
     // True once when button i has been held continuously for at least
     // Config::LONG_PRESS_MS. Latches like pressed() — call clearLongPress(i)
@@ -84,6 +85,7 @@ private:
     UnitByte dev_;
     bool     btnCurrent_[kNumButtons]      = {};
     bool     btnPrev_[kNumButtons]         = {};
+    bool     seeded_ = false;   // first poll seeds baselines, latches nothing
     bool     btnPressed_[kNumButtons]      = {};  // latched short-press rising edge
     uint32_t pressStartMs_[kNumButtons]    = {};  // millis() at rising edge
     bool     longLatched_[kNumButtons]     = {};  // PUBLIC-facing long-press flag,

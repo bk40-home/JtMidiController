@@ -1,57 +1,40 @@
 // =============================================================================
-// LedManager.h — Context-aware LED feedback
+// LedManager.h — M5 unit LED feedback (Phase E)
 // =============================================================================
-// Drives LEDs on all three units based on the current page state:
+// The LEDs answer one question: WHICH CONTROLS ARE LIVE RIGHT NOW?
 //
-//   ByteButton LEDs:
-//     - Active page button lit in page colour, others dim
-//     - Future: voice activity (amp envelope brightness from Teensy)
+// In Phase E the answer is simple, because the binding is: the visible rows of
+// the current sub-tab, in order. Pots take rows 0..7, encoders take rows 8..15.
+// A control with no row is DARK, so an unlit knob genuinely does nothing rather
+// than doing something invisible.
 //
-//   Angle8 LEDs:
-//     - Active pots: page colour at brightness proportional to CC value
-//     - Inactive/unmapped pots: off
-//     - Seeking pots (pickup mode): dim pulsing to indicate "seeking"
+//   ByteButton i  -> page i. Bright = current page.
+//   Pot i         -> lit if row i exists. Red while pickup has not caught up.
+//   Encoder i     -> lit if row i+8 exists. A toggle shows its STATE.
 //
-//   Encoder8 LEDs:
-//     - Active encoders: page colour
-//     - Sub-page selector: active sub-page bright, inactive dim
-//     - Toggle encoders: bright = on, dim = off
-//
-// All LED writes are change-gated — only issued when state actually changes.
+// All writes are change-gated: a static panel costs zero I2C traffic.
 // =============================================================================
 #pragma once
 
 #include <Arduino.h>
+
 #include "Config.h"
-#include "PageDefs.h"
-#include "PageManager.h"
+#include "ColorUtils.h"
+#include "ViewController.h"
 #include "Angle8Unit.h"
 #include "Encoder8Unit.h"
 #include "ByteButtonUnit.h"
-#include "ColorUtils.h"
 
 class LedManager {
 public:
-    LedManager() = default;
+    void begin(Angle8Unit& angle, Encoder8Unit& encoder, ByteButtonUnit& buttons);
 
-    // Initialise all LEDs to off
-    void begin(Angle8Unit& angle, Encoder8Unit& encoder,
-               ByteButtonUnit& buttons);
-
-    // Update LEDs based on current page state. Call at LED_UPDATE_MS cadence.
-    void update(const PageManager& pages,
+    void update(const ViewController& view,
                 Angle8Unit& angle, Encoder8Unit& encoder,
                 ByteButtonUnit& buttons);
 
 private:
-    // Cached states to avoid redundant I2C writes
-    uint32_t prevBtnLed_[8]  = {};
-    uint32_t prevEncLed_[8]  = {};
-    uint32_t prevPotLed_[8]  = {};
-    PageID   prevPage_       = PageID::HOME;
-    uint8_t  prevSubPage_    = 0;
-
-    void updateByteButtons(const PageManager& pages, ByteButtonUnit& buttons);
-    void updateEncoderLeds(const PageManager& pages, Encoder8Unit& encoder);
-    void updatePotLeds(const PageManager& pages, Angle8Unit& angle);
+    uint32_t prevBtn_[8] = {};
+    uint32_t prevEnc_[8] = {};
+    uint32_t prevPot_[8] = {};
 };

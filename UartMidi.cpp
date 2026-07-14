@@ -1,106 +1,67 @@
 // =============================================================================
-// UartMidi.cpp
+// UartMidi.cpp — raw MIDI byte pipe. See UartMidi.h.
+// =============================================================================
+// (c) 2026 Kris Bishop — MIT licensed.
 // =============================================================================
 #include "UartMidi.h"
 
-// ── MIDI instance on ESP32 UART1 ────────────────────────────────────────────
-// HardwareSerial(1) selects UART1 on the ESP32-S3. Pin assignment happens
-// in begin() via Serial1.begin(baud, config, rxPin, txPin).
+// -----------------------------------------------------------------------------
+// UART + MIDI parser plumbing. Unchanged from Phase C: HardwareSerial(1),
+// FortySevenEffects over a SerialMIDI transport, singleton trampolines.
+// Only the protocol layer above it was removed.
+// -----------------------------------------------------------------------------
 static HardwareSerial TeensySerial(Config::UART_NUM);
 
-// Custom MIDI settings: 115200 baud instead of standard 31250
 struct UartMidiSettings : public midi::DefaultSettings {
-    static const long BaudRate = Config::UART_BAUD;
+    static const long BaudRate = Config::UART_BAUD;   // 1 Mbaud — see Config.h
 };
-
-// Create the MIDI instance bound to the UART
-static MIDI_NAMESPACE::MidiInterface<
-    MIDI_NAMESPACE::SerialMIDI<HardwareSerial, UartMidiSettings>
->* midiTeensy = nullptr;
 
 static MIDI_NAMESPACE::SerialMIDI<HardwareSerial, UartMidiSettings>*
     serialTransport = nullptr;
+static MIDI_NAMESPACE::MidiInterface<
+    MIDI_NAMESPACE::SerialMIDI<HardwareSerial, UartMidiSettings>>*
+    midiTeensy = nullptr;
 
-// Static pointer so the callbacks can reach the singleton instance
 static UartMidi* sInstance = nullptr;
-
-// ── Initialisation ──────────────────────────────────────────────────────────
 
 void UartMidi::begin() {
     sInstance = this;
 
-    // Configure UART1 pins before MIDI library takes over
+    // Explicit pin mapping — the S3's UART1 defaults are not ours.
     TeensySerial.begin(Config::UART_BAUD, SERIAL_8N1,
                        Config::UART_RX_PIN, Config::UART_TX_PIN);
 
-    // Create transport and MIDI interface
     serialTransport = new MIDI_NAMESPACE::SerialMIDI<
         HardwareSerial, UartMidiSettings>(TeensySerial);
     midiTeensy = new MIDI_NAMESPACE::MidiInterface<
         MIDI_NAMESPACE::SerialMIDI<HardwareSerial, UartMidiSettings>>(
             *serialTransport);
 
-    // Listen on all channels (Teensy may respond on any channel)
-    midiTeensy->begin(MIDI_CHANNEL_OMNI);
-    midiTeensy->turnThruOff();  // no echo back to Teensy
-
-    // Register incoming message handlers
     midiTeensy->setHandleControlChange(handleCC);
     midiTeensy->setHandleNoteOn(handleNoteOn);
     midiTeensy->setHandleNoteOff(handleNoteOff);
+    midiTeensy->begin(MIDI_CHANNEL_OMNI);
 
-    Serial.println("[UART-MIDI] Initialised on UART1 @ 115200 baud");
+    // CRITICAL: thru would bounce the Teensy's broadcast straight back at it —
+    // an echo loop its origin-suppression cannot see, because the reflection
+    // looks like *us* sending. Same rule on both ends.
+    midiTeensy->turnThruOff();
+
+    Serial.printf("[UART-MIDI] byte pipe on UART1 @ %lu baud\r\n",
+                  (unsigned long)Config::UART_BAUD);
 }
-
-// ── Polling ─────────────────────────────────────────────────────────────────
 
 void UartMidi::poll() {
     if (!midiTeensy) return;
-    // Read all available MIDI messages this iteration
     while (midiTeensy->read()) { }
 }
 
-// ── Outgoing messages ───────────────────────────────────────────────────────
+// ── Outgoing ────────────────────────────────────────────────────────────────
 
 void UartMidi::sendCC(uint8_t cc, uint8_t value, uint8_t channel) {
     if (!midiTeensy) return;
-
-    if (cc <= 127) {
-        // Standard MIDI CC — fits in the 7-bit CC number field
-        midiTeensy->sendControlChange(cc, value, channel);
-        return;
-    }
-
-    // ── Extended CC (128+) — wrap in JT-8000 SysEx ──────────────────────
-    // CCs above 127 (envelope curves 147-155, perf params 140-146) cannot
-    // travel as standard MIDI CC messages because the CC number field is
-    // only 7 bits. We wrap them in a lightweight SysEx message that the
-    // Teensy's SysExAdapter dispatches to the same handleControlChange()
-    // path as normal CCs.
-    //
-    // Wire format (11 bytes, all body bytes 7-bit safe):
-    //   F0 7D 4A 54 00 20 <ch> <cc_hi> <cc_lo> <val> F7
-    //
-    // cc_hi/cc_lo split mirrors SyxProtocol.h paramId encoding.
-    // Keep these constants in sync with SyxProtocol.h on the Teensy side.
-    static constexpr uint8_t kMfrId   = 0x7D;  // MMA non-commercial
-    static constexpr uint8_t kSubIdJ  = 0x4A;  // 'J'
-    static constexpr uint8_t kSubIdT  = 0x54;  // 'T'
-    static constexpr uint8_t kDevId   = 0x00;  // default device
-    static constexpr uint8_t kMsgType = 0x20;  // EXT_CC
-
-    const uint8_t msg[11] = {
-        0xF0,
-        kMfrId, kSubIdJ, kSubIdT,
-        kDevId,
-        kMsgType,
-        (uint8_t)(channel & 0x7F),
-        (uint8_t)((cc >> 7) & 0x7F),   // cc_hi
-        (uint8_t)(cc & 0x7F),           // cc_lo
-        (uint8_t)(value & 0x7F),
-        0xF7
-    };
-    midiTeensy->sendSysEx(11, msg, true);
+    midiTeensy->sendControlChange(cc, value, channel);
+    ++tx_;
 }
 
 void UartMidi::sendNoteOn(uint8_t note, uint8_t velocity, uint8_t channel) {
@@ -118,25 +79,22 @@ void UartMidi::sendPitchBend(int16_t value, uint8_t channel) {
     midiTeensy->sendPitchBend(value, channel);
 }
 
-void UartMidi::sendSysEx(const uint8_t* data, size_t length) {
-    if (!midiTeensy) return;
-    midiTeensy->sendSysEx(length, data, true);  // hasBeginEnd = true
-}
-
-// ── Incoming message handlers ───────────────────────────────────────────────
-// Static callbacks — forward to the singleton's registered callback
+// ── Inbound ─────────────────────────────────────────────────────────────────
+//
+// Everything is forwarded RAW. This class does not know which CCs are NRPN and
+// must not guess: the NRPN cluster numbers collide with real v1 parameter CCs
+// (v1 CC 98 was reverb hipass), so only JtParam::Receiver — which tracks the
+// protocol state — can tell a stray CC 98 from an NRPN LSB.
 
 void UartMidi::handleCC(byte channel, byte cc, byte value) {
-    if (sInstance && sInstance->onCC_) {
-        sInstance->onCC_(channel, cc, value);
+    if (!sInstance) return;
+    ++sInstance->rx_;
+    if (sInstance->onCC_) {
+        sInstance->onCC_(static_cast<uint8_t>(channel),
+                         static_cast<uint8_t>(cc),
+                         static_cast<uint8_t>(value));
     }
 }
 
-void UartMidi::handleNoteOn(byte channel, byte note, byte velocity) {
-    // Future: forward to display for note indicator or voice activity
-    (void)channel; (void)note; (void)velocity;
-}
-
-void UartMidi::handleNoteOff(byte channel, byte note, byte velocity) {
-    (void)channel; (void)note; (void)velocity;
-}
+void UartMidi::handleNoteOn(byte, byte, byte)  { /* controller sends only */ }
+void UartMidi::handleNoteOff(byte, byte, byte) { /* controller sends only */ }

@@ -44,6 +44,16 @@ bool ByteButtonUnit::begin(TwoWire* wire, uint8_t sda, uint8_t scl,
 void ByteButtonUnit::poll() {
     if (!present_) return;
 
+    // First poll seeds the edge baselines and latches NOTHING — same rule as
+    // Encoder8Unit. readPressed() is active-low, so a garbage 0x00 from a
+    // not-yet-ready device reads as "all eight pressed" and would latch
+    // eight phantom page-switches at boot.
+    if (!seeded_) {
+        for (uint8_t i = 0; i < kNumButtons; ++i) btnPrev_[i] = readPressed(i);
+        seeded_ = true;
+        return;
+    }
+
     const uint32_t now = millis();
 
     for (uint8_t i = 0; i < kNumButtons; ++i) {

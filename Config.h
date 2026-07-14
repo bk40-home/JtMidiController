@@ -20,7 +20,8 @@ static constexpr uint8_t  I2C_SCL       = 7;
 static constexpr uint32_t I2C_CLOCK_HZ  = 50000;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// UART to Teensy — MIDI protocol at 115200 baud over Serial1
+// UART to Teensy — v2 NRPN link at 1 Mbaud (Phase C).  MUST equal the
+// Teensy's Board::kSerial1MidiBaud.  Not DIN-compatible (both ends ours).
 //
 // WIRING:
 //   ESP32 GPIO 17 (TX) ─── Teensy pin 0 (RX1)
@@ -34,7 +35,7 @@ static constexpr uint32_t I2C_CLOCK_HZ  = 50000;
 // ─────────────────────────────────────────────────────────────────────────────
 static constexpr uint8_t  UART_TX_PIN   = 17;
 static constexpr uint8_t  UART_RX_PIN   = 18;
-static constexpr uint32_t UART_BAUD     = 31250;
+static constexpr uint32_t UART_BAUD     = 1000000;
 // ESP32-S3 UART peripheral index (0 = debug console, 1 = Teensy link)
 static constexpr uint8_t  UART_NUM      = 1;
 
@@ -97,6 +98,40 @@ static constexpr uint32_t LED_UPDATE_MS     = 200;   // LED refresh (~5 Hz, was 
 // LED writes at 50kHz I2C take ~2ms each × 25 LEDs = 50ms per update.
 // At 20ms interval, the bus was permanently saturated with LED writes,
 // blocking pot/encoder reads. 200ms gives ~80% bus time to polling.
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Encoder feel — M5 8Encoder detent scaling
+// ─────────────────────────────────────────────────────────────────────────────
+// The unit's cumulative counter advances 2 counts per physical detent, so raw
+// deltas must be divided down or every detent steps a parameter twice. The
+// divide carries its remainder across polls — a poll that catches an encoder
+// mid-detent loses nothing.
+static constexpr int32_t  ENC_COUNTS_PER_DETENT = 2;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Display render budget — bounded SPI time per frame
+// ─────────────────────────────────────────────────────────────────────────────
+// Rendering shares the loop with pot/touch polling. A full 480×320 blit is
+// ~614 KB over SPI (>100 ms blocked), which starves ResponsiveAnalogRead of
+// polls — the cause of pots lagging and never converging on their endpoints.
+// Repaints are therefore SLICED: per display frame, at most one background
+// band of UI_ERASE_BAND_PX and UI_ROW_BUDGET rows are painted. A page change
+// completes over ~4 frames; the loop never blocks long enough to feel.
+static constexpr uint8_t  UI_ROW_BUDGET     = 6;
+static constexpr int16_t  UI_ERASE_BAND_PX  = 72;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Touch gestures
+// ─────────────────────────────────────────────────────────────────────────────
+// Vertical dead-zone before a row drag starts WRITING. The FT6336 jitters a
+// pixel or two on a stationary finger, and without a dead-zone every tap
+// nudged the value it landed on. Once broken, the drag is offset by this
+// amount so engagement is continuous — no value jump at the threshold.
+static constexpr int16_t  DRAG_DEADZONE_PX   = 6;
+// Horizontal travel of a TWO-finger gesture that pages. Single-touch swipe is
+// gone: the touch controller zeroes its coordinates on release, which made
+// the old release-frame swipe test read plain taps as page flips.
+static constexpr int16_t  TWO_FINGER_SWIPE_PX = 60;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Pot filtering — ResponsiveAnalogRead tuning

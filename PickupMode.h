@@ -1,31 +1,39 @@
 // =============================================================================
-// PickupMode.h — Pot pickup handling
+// PickupMode.h — pot pickup handling (Phase C: normalised float)
 // =============================================================================
-// When the user switches pages, pot physical position may not match the stored
-// CC value for the new mapping. Without pickup mode, moving the pot would
-// cause an immediate jump to wherever the pot physically is.
+// When the user switches page, a pot's physical position no longer matches the
+// stored value for the new mapping. Without pickup, touching the pot would jump
+// the parameter to wherever the pot happens to be sitting.
 //
-// PICKUP BEHAVIOUR:
-//   1. On page change, each pot enters "seeking" state
-//   2. The pot does NOT send CC until it crosses the stored target value
-//   3. Once crossed, the pot "picks up" and sends normally
-//   4. The display shows a direction arrow (↑↓) and target value while seeking
+// PICKUP BEHAVIOUR
+//   1. On page/scene change every pot enters "seeking".
+//   2. A seeking pot emits NOTHING until it crosses its stored target.
+//   3. Once crossed it "picks up" and tracks normally.
+//   4. The display shows a direction arrow + target while seeking.
 //
-// This applies to all pot-mapped CCs. Encoders do not need pickup — they
-// send relative deltas, not absolute positions.
+// Encoders never need pickup — they send relative deltas, not absolute position.
 //
-// PICKUP THRESHOLD:
-//   The pot picks up when it crosses within ±PICKUP_THRESHOLD of the target.
-//   A tight threshold (2-3) feels precise; a loose one (5+) is easier to grab.
+// PHASE C CHANGE — VALUES ARE NORMALISED FLOATS (0..1), NOT CC BYTES
+//   The pot hardware still reports 0..127; that conversion now happens at the
+//   hardware boundary in PageManager (potNorm()), so everything above the
+//   boundary speaks one unit. Thresholds that used to be in CC units are now
+//   fractions of full scale:
 //
-// SNAP ON DECISIVE MOVE (Config::PICKUP_SNAP_CC):
-//   At ~1 kHz polling even a fast user twist is sub-1-CC per poll, so
-//   per-poll-delta detection is unreliable. Instead, on the first process()
-//   call after seeking begins, the current pot reading is latched as the
-//   seek-start anchor. If the pot subsequently moves ≥ PICKUP_SNAP_CC units
-//   away from that anchor, the pot picks up immediately regardless of the
-//   target value — that's what the user means by a "decisive move".
-//   PICKUP_SNAP_CC = 0 disables snap entirely (pure pickup behaviour).
+//     kThreshold  Config::PICKUP_THRESHOLD / 127.0f
+//     kSnap       Config::PICKUP_SNAP_CC   / 127.0f
+//
+//   Expressing them as fractions of the OLD CC scale keeps the feel identical
+//   to what the panel had before — the pot still has ~128 physical steps, so a
+//   threshold of "2 CC" and one of "2/127 of full scale" are the same distance.
+//   Only the arithmetic moved.
+//
+// SNAP ON DECISIVE MOVE
+//   At ~1 kHz polling even a fast twist is sub-one-step per poll, so per-poll
+//   delta detection is unreliable. Instead the first process() call after
+//   seeking begins latches the pot's position as an anchor. If the pot later
+//   moves kSnap away from that anchor, it picks up immediately regardless of
+//   the target — that is what a user means by a decisive move. kSnap == 0
+//   disables snap (pure pickup).
 // =============================================================================
 #pragma once
 
@@ -34,41 +42,43 @@
 
 class PickupMode {
 public:
-    static constexpr uint8_t kNumPots   = 8;
-    static constexpr uint8_t kThreshold = Config::PICKUP_THRESHOLD;
-    // 0 = snap disabled; otherwise the CC-unit distance from the seek-start
-    // anchor that counts as a "decisive move" and forces pickup.
-    static constexpr uint8_t kSnapCC    = Config::PICKUP_SNAP_CC;
+    static constexpr uint8_t kNumPots = 8;
+
+    // Thresholds as fractions of full scale — see the header note on why these
+    // are still derived from the old CC-unit constants.
+    static constexpr float kThreshold =
+        static_cast<float>(Config::PICKUP_THRESHOLD) / 127.0f;
+    static constexpr float kSnap =
+        static_cast<float>(Config::PICKUP_SNAP_CC) / 127.0f;
 
     PickupMode() = default;
 
-    // ── Page change handling ────────────────────────────────────────────────
-    // Call when the page or scene changes. Sets all pots to "seeking" state
-    // with the given target CC values. The seek-start anchor for each pot is
-    // latched lazily on the first process() call (we don't have the pot
-    // reading at the moment of the page change).
-    void onPageChange(const uint8_t targets[kNumPots]);
+    // ── Page / scene change ─────────────────────────────────────────────────
+    // Puts every pot into seeking with the supplied normalised targets. The
+    // seek anchor is latched lazily on the first process() call, because the
+    // live pot readings are not available at the moment the page changes.
+    void onPageChange(const float targets[kNumPots]);
 
-    // Set target for a single pot (e.g. when Teensy sends a CC update)
-    void setTarget(uint8_t potIdx, uint8_t targetCC);
+    // Update one pot's target — e.g. the Teensy pushed a new value for a
+    // parameter that a pot on this page is bound to. Does NOT reset seeking:
+    // a pot that has already picked up keeps tracking.
+    void setTarget(uint8_t potIdx, float target);
 
-    // ── Per-poll processing ─────────────────────────────────────────────────
-    // Call for each pot every poll cycle with the pot's current CC value.
-    // Returns true if the pot has picked up and the value should be sent.
-    // If false, the value should be suppressed (pot is still seeking).
-    bool process(uint8_t potIdx, uint8_t currentCC);
+    // ── Per-poll ────────────────────────────────────────────────────────────
+    // Call every poll with the pot's current normalised position.
+    // Returns true if the pot has picked up and its value should be emitted.
+    bool process(uint8_t potIdx, float current);
 
-    // ── State queries (for display) ─────────────────────────────────────────
-    // True if pot is still seeking (hasn't picked up yet)
-    bool isSeeking(uint8_t potIdx) const;
-    // Target CC value the pot is seeking toward
-    uint8_t targetValue(uint8_t potIdx) const;
-    // Direction to move: +1 = turn up, -1 = turn down, 0 = at target
-    int8_t seekDirection(uint8_t potIdx, uint8_t currentCC) const;
+    // ── Display state ───────────────────────────────────────────────────────
+    bool  isSeeking(uint8_t potIdx) const;
+    float targetValue(uint8_t potIdx) const;
+
+    // +1 = turn up to reach target, -1 = turn down, 0 = at target.
+    int8_t seekDirection(uint8_t potIdx, float current) const;
 
 private:
-    uint8_t targets_[kNumPots]      = {};   // target CC values
-    uint8_t seekStartCC_[kNumPots]  = {};   // pot reading when seeking began
-    bool    seeking_[kNumPots]      = {};   // true = pot hasn't picked up yet
-    bool    seekStarted_[kNumPots]  = {};   // seekStartCC_ latched for this seek
+    float targets_[kNumPots]     = {};
+    float seekStart_[kNumPots]   = {};   // anchor, valid once seekStarted_
+    bool  seeking_[kNumPots]     = {};
+    bool  seekStarted_[kNumPots] = {};
 };
