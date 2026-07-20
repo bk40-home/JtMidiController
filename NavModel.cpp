@@ -27,6 +27,13 @@ using JT::Params::kNoVisDep;
 //   [ 5] Filter Envelope  [11] Performance
 // ─────────────────────────────────────────────────────────────────────────────
 static const Page kPages[kPageCount] = {
+    // HOME is page 0 — the boot page, the performance dashboard. Section 0xFF
+    // is the "no rows" sentinel (same mechanism as the ENV overlay tab): the
+    // HomePanel owns the whole content area. The ByteButtons deliberately map
+    // to pages 1..8 (see handleButtons), so the eight EDITING pages keep the
+    // exact button positions muscle memory already knows; HOME is reached by
+    // two-finger swipe or the page menu.
+    { "HOME",  PageKind::Home,      { {"HOME", 0xFF} },                                 1, false },
     { "OSC",   PageKind::List,      { {"OSC 1", 0}, {"OSC 2", 1}, {"MIX", 2} },        3, false },
     { "FILT",  PageKind::Filter,    { {"FILTER", 3} },                                  1, false },
     // ENV declares 3 real sub-tabs; the 4th ("ALL") is the overlay and has no

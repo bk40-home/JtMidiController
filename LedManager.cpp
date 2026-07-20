@@ -60,7 +60,9 @@ void LedManager::update(const ViewController& view,
                     c = on ? kAccent : ColorUtils::scaleBrightness(kAccent, 20);
                 }
             } else {
-                c = (i == page)
+                // Buttons map to editing pages 1..8 (HOME is page 0, no
+                // button) — mirror of ViewController::handleButtons.
+                c = (static_cast<uint8_t>(i + 1) == page)
                     ? kPageColour[i]
                     : ColorUtils::scaleBrightness(kPageColour[i], 25);
             }

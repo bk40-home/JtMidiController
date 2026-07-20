@@ -37,6 +37,13 @@ void PatchManager::begin(PatchStore& store, ViewController& vc) {
 
         loadedName_[16] = '\0';
 
+        // Push into the view: header name + HOME slot. Push-on-change by
+        // construction — runs only when the loaded patch actually changes,
+        // never per loop, so it cannot re-create the every-frame header
+        // repaints Phase F1 removed.
+        vc_->setPatchName(loadedName_);
+        vc_->setPatchSlot(loadedSlot_);
+
     }
 
 }
@@ -195,7 +202,8 @@ void PatchManager::handleLoadPush() {
 
     loadedName_[16] = '\0';
 
-
+    vc_->setPatchName(loadedName_);   // see the begin() note: push-on-change
+    vc_->setPatchSlot(loadedSlot_);
 
     showBanner(PtchBannerType::LOADED, loadedSlot_, Config::PTCH_BANNER_MS);
 
@@ -402,6 +410,8 @@ void PatchManager::commitNameEdit() {
             strncpy(loadedName_, text, 16);
 
             loadedName_[16] = '\0';
+
+            vc_->setPatchName(loadedName_);   // header + HOME follow the rename
 
         }
 

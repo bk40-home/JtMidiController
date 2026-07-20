@@ -48,6 +48,13 @@ public:
     // Which step is under this touch point, or 0xFF.
     static uint8_t stepAt(int16_t x, int16_t y);
 
+    // Tap-grid entry (standing spec: TAP, not drag): the tapped HEIGHT is the
+    // step value. Exact inverse of the bar drawing — bottom edge 0.0, top
+    // edge 1.0 — so a step reads back exactly where the finger put it. The
+    // mid-line is a visual reference only (0.5 = no modulation on bipolar
+    // destinations).
+    static float valueFromY(int16_t y);
+
     static constexpr int16_t kGridY = 46;    // top of the content area
     static constexpr int16_t kGridH = 114;   // ENDS at 160, above the rows
 

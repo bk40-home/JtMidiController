@@ -69,7 +69,7 @@ struct Page {
     bool        hasOverlayTab;   // ENV only: a 4th tab showing all three at once
 };
 
-static constexpr uint8_t kPageCount   = 8;
+static constexpr uint8_t kPageCount   = 9;   // HOME + the 8 editing pages
 static constexpr uint8_t kOverlaySub  = 0xFE;   // the ENV "ALL" tab
 
 const Page& page(uint8_t idx);

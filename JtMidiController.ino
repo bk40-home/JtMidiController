@@ -93,6 +93,36 @@ static LedManager      leds;
 static NameEditor      nameEditor;
 static SelectPopup     selectPopup;
 static PatchOverlay    patchOverlay;
+
+static constexpr uint8_t ENC_MODAL = 0;
+
+// ── Modal input hygiene ─────────────────────────────────────────────────────
+// A modal owns ALL input while active. Presses on controls it does not use
+// are DRAINED, not left latched — a latch that survives a modal fires a
+// phantom action the instant the modal closes (the same defect class as the
+// Phase F3 unbound-encoder drain, one layer up). Returns true when a
+// LONG-press landed: the universal close-the-modal gesture — symmetric with
+// the long-press that opens the patch overlay, and reachable without
+// touching the screen, per hardware feedback.
+static bool modalDrainButtons(ByteButtonUnit& b) {
+    bool longFired = false;
+    for (uint8_t i = 0; i < ByteButtonUnit::kNumButtons; ++i) {
+        if (b.longPressed(i)) {
+            b.clearLongPress(i);
+            b.clearPress(i);          // the same edge also latched a short
+            longFired = true;
+        } else if (b.pressed(i) && !b.buttonHeld(i)) {
+            b.clearPress(i);          // released without going long: discard
+        }
+    }
+    return longFired;
+}
+static void modalDrainEncoders(Encoder8Unit& e) {
+    for (uint8_t i = 0; i < Encoder8Unit::kNumEncoders; ++i) {
+        if (i == ENC_MODAL) continue; // the modal's own encoder is consumed
+        if (e.pressed(i)) e.clearPress(i);
+    }
+}
 static PatchStore      patchStore;
 static PatchManager    patchManager;
 
@@ -102,7 +132,6 @@ static Arduino_GFX*    gfx = nullptr;
 
 // Encoder that drives a modal overlay while it is open (rotate = move the
 // highlight, push = commit). Index 0 is the natural navigation wheel.
-static constexpr uint8_t ENC_MODAL = 0;
 
 // ── Timing gates ────────────────────────────────────────────────────────────
 static uint32_t lastDisplayMs = 0;
@@ -241,6 +270,11 @@ void loop() {
             if      (a == NameEditor::Action::COMMIT) patchManager.commitNameEdit();
             else if (a == NameEditor::Action::CANCEL) nameEditor.close();
         }
+        // Long-press any ByteButton = close (cancel), same gesture as every
+        // modal; stray shorts and encoder presses are drained, not latched.
+        if (modalDrainButtons(buttons)) nameEditor.close();
+        modalDrainEncoders(encoder);
+
         if (gfx) nameEditor.draw(gfx);
 
         // The keyboard paints the FULL screen, so its close is the one case
@@ -250,6 +284,12 @@ void loop() {
         if (!nameEditor.isActive()) view.forceRedraw();
 
     } else if (patchOverlay.isActive()) {
+        // Long-press any ByteButton closes the overlay — the mirror of the
+        // long-press that opened it, so load-and-leave never needs the
+        // touchscreen. The close-repair below runs on the same pass.
+        if (modalDrainButtons(buttons)) patchOverlay.close();
+        modalDrainEncoders(encoder);
+
         if (touch.tapped()) {
             patchOverlay.handleTouch(static_cast<int16_t>(touch.tapX()),
                                      static_cast<int16_t>(touch.tapY()));
@@ -276,6 +316,9 @@ void loop() {
         }
 
     } else if (selectPopup.isActive()) {
+        if (modalDrainButtons(buttons)) selectPopup.close();   // cancel
+        modalDrainEncoders(encoder);
+
         if (touch.tapped()) {
             const SelectPopup::Action a =
                 selectPopup.handleTouch(touch.tapX(), touch.tapY());
@@ -354,7 +397,14 @@ void loop() {
     // ZERO draw calls, so this costs nothing when nothing is moving.
     if (now - lastDisplayMs >= Config::DISPLAY_FRAME_MS) {
         lastDisplayMs = now;
-        if (!nameEditor.isActive() && !selectPopup.isActive()) view.render();
+        // Every modal gates the view, or the content repaints THROUGH a
+        // floating panel. The patch overlay was missing here — invisible
+        // until HOME made the background live (voice dots, playhead, link),
+        // at which point status updates painted straight through the panel.
+        if (!nameEditor.isActive() && !selectPopup.isActive()
+            && !patchOverlay.isActive()) {
+            view.render();
+        }
     }
 
     // ── 6. Debug (once a second) ────────────────────────────────────────

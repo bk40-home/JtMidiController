@@ -40,6 +40,7 @@
 #include "Encoder8Unit.h"
 #include "ByteButtonUnit.h"
 #include "TouchInput.h"
+#include "HomePanel.h"
 
 class ViewController {
 public:
@@ -58,6 +59,17 @@ public:
     void requestResync() { nrpn_.requestResync(); }
 
     uint16_t takeSelectPopupRequest();
+
+    // Engine status word from NRPN 0x3FFF: [mask:8|step:4|running:1].
+    void applyStatus(uint16_t status14) {
+        voiceMask_  = static_cast<uint8_t>((status14 >> 5) & 0xFF);
+        playStep_   = static_cast<uint8_t>((status14 >> 1) & 0x0F);
+        seqRunning_ = (status14 & 1u) != 0;
+    }
+
+    // The HOME dashboard shows which slot is loaded; PatchManager owns that
+    // fact, the .ino ferries it here after PatchManager updates.
+    void setPatchSlot(uint8_t slot) { patchSlot_ = slot; }
 
     // Long-press on any ByteButton parks this; the .ino collects it and opens
     // the PatchOverlay — same parked-request pattern as the SelectPopup, so
@@ -152,6 +164,7 @@ private:
     JtView::RowList     list_;
     JtView::EnvPanel    env_;
     JtView::SeqPanel    seq_;
+    JtView::HomePanel   home_;
     JtView::FilterPanel filt_;
 
     Arduino_GFX* gfx_ = nullptr;
@@ -205,6 +218,27 @@ private:
     bool     twoFingerFired_ = false;   // fired once; ignore further travel
     int16_t  twoFingerX0_    = 0;       // primary-contact x at gesture start
 
+    // ── Engine status feed (NRPN 0x3FFF) + HOME state ───────────────────────
+    // Written by applyStatus() from the rx trampoline; read by render() for
+    // the HOME dashboard and the SEQ playhead. lastRxMs_ ticks on ANY inbound
+    // CC — the LINK dot is "the wire is alive", not "a param changed".
+    uint8_t  voiceMask_  = 0;
+    uint8_t  playStep_   = 0;
+    bool     seqRunning_ = false;
+    uint32_t lastRxMs_   = 0;
+    uint8_t  patchSlot_  = 0xFF;
+    uint16_t ordMasterVol_ = 0xFFFF;   // resolved once in begin()
+    bool     homeVolDrag_  = false;    // finger owns the volume bar
+
+    // ── SEQ edit-cursor sync (SEL row <-> grid <-> VAL row) ─────────────────
+    // SEL selects a step: the grid highlights it and the VAL row LOADS its
+    // value (display only, nothing sent — the engine keeps its own edit
+    // cursor from the SEL write itself). VAL then fine-tunes: any change,
+    // from pot, drag, encoder or inbound NRPN, writes through to the grid.
+    uint8_t  seqSelStep_ = 0xFF;        // 0xFF = not yet synced on this page
+    uint16_t ordSeqSel_  = 0xFFFF;      // ordinals resolved once in begin();
+    uint16_t ordSeqVal_  = 0xFFFF;      // the sync runs every loop frame
+
     void handleButtons(ByteButtonUnit& buttons);
     void handlePots(Angle8Unit& angle);
     void handleEncoders(Encoder8Unit& encoder);
@@ -213,6 +247,10 @@ private:
     // Invalidate the content region (everything below the tab strip) and start
     // the sliced erase. Does NOT touch the NavBar — it detects its own changes.
     void invalidateContent();
+
+    // Keep the SEL/VAL rows and the grid telling one story — see the member
+    // note above. Called once per update(), cheap when nothing changed.
+    void syncSeqEditRows();
 
     // Recollect the visible rows. Returns true only if the visible SET changed
     // — compared by CONTENT, not count, because a visible_when flip can swap

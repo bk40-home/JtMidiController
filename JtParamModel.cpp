@@ -181,6 +181,22 @@ float step(const ParamDesc& d, float t, int32_t steps) {
         case Type::Toggle:
             return setOn(!isOn(d, t));
 
+        case Type::Int: {
+            // Step on the INTEGER lattice, clamped (a step count that wraps
+            // 16 -> 1 under an encoder would be hostile). The lattice is
+            // min + round(norm*(max-min)) — the same formula the firmware
+            // uses per-ID (e.g. SEQ_STEPS `1 + lroundf(norm*15)`), so the
+            // number shown IS the number the engine lands on.
+            const float span = d.max - d.min;
+            if (span <= 0.0f) return t;
+            int v = static_cast<int>(d.min)
+                  + static_cast<int>(lroundf(t * span))
+                  + static_cast<int>(steps);
+            if (v < static_cast<int>(d.min)) v = static_cast<int>(d.min);
+            if (v > static_cast<int>(d.max)) v = static_cast<int>(d.max);
+            return (static_cast<float>(v) - d.min) / span;
+        }
+
         case Type::Continuous:
         default:
             return clamp01(t + static_cast<float>(steps) * kContStep);
@@ -214,6 +230,15 @@ void format(const ParamDesc& d, float t, char* buf, uint8_t len) {
     // ---- Toggle ------------------------------------------------------------
     if (d.type == Type::Toggle) {
         snprintf(buf, len, "%s", isOn(d, t) ? "On" : "Off");
+        return;
+    }
+
+    // ---- Int: a plain whole number -----------------------------------------
+    if (d.type == Type::Int) {
+        const float span = d.max - d.min;
+        const int v = static_cast<int>(d.min)
+                    + static_cast<int>(lroundf(t * (span > 0.0f ? span : 0.0f)));
+        snprintf(buf, len, "%d", v);
         return;
     }
 

@@ -92,6 +92,14 @@ public:
     // means the caller handed us something that is not a v2 patch.
     bool loadAll(const float* src, size_t count, bool markDirty);
 
+    // set() skips the dirty mark when the value is unchanged — correct for
+    // knobs, WRONG for the sequencer's indexed pair (D-5): painting the same
+    // VALUE onto a different STEP re-writes seq.step_value with an equal
+    // float, and the send would silently be swallowed while the grid shows
+    // the bar. This variant always marks dirty. Use it ONLY for indexed
+    // writes whose meaning depends on a sibling address parameter.
+    bool setForce(uint16_t ordinal, float t);
+
     // Read-only view for PatchStore::save().
     const float* raw() const { return values_; }
     size_t       size() const { return JT::Params::kParamCount; }

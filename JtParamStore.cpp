@@ -87,6 +87,16 @@ bool Store::set(uint16_t ordinal, float t) {
     return true;
 }
 
+bool Store::setForce(uint16_t ordinal, float t) {
+    if (ordinal >= kN) return false;
+    if (!(t == t)) return false;                  // reject NaN at the door
+    if (t < 0.0f) t = 0.0f;
+    if (t > 1.0f) t = 1.0f;
+    values_[ordinal] = t;
+    markDirty_(ordinal);                          // even when unchanged — D-5
+    return true;
+}
+
 bool Store::setQuiet(uint16_t ordinal, float t) {
     if (ordinal >= kN) return false;
     if (!(t == t)) return false;

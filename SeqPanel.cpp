@@ -64,6 +64,17 @@ uint8_t SeqPanel::stepAt(int16_t x, int16_t y) {
 // Draw
 // ─────────────────────────────────────────────────────────────────────────────
 
+float SeqPanel::valueFromY(int16_t y) {
+    // Unipolar, mirroring drawBar exactly: bottom edge = 0, top edge = 1.
+    // (The first tap-grid pass used the bipolar mid-line mapping, which made
+    // half-height taps produce near-empty bars — hard to edit by eye.)
+    const float B = static_cast<float>(kGridY + kGridH);
+    float v = (B - static_cast<float>(y)) / static_cast<float>(kGridH);
+    if (v < 0.0f) v = 0.0f;
+    if (v > 1.0f) v = 1.0f;
+    return v;
+}
+
 void SeqPanel::drawBar(uint8_t i, float v, uint8_t activeCount,
                        bool isHead, bool isFocus) {
     const int16_t x = static_cast<int16_t>(kPadX + i * (kBarW + kGap));
@@ -77,27 +88,26 @@ void SeqPanel::drawBar(uint8_t i, float v, uint8_t activeCount,
     const bool active = (i < activeCount);
     const uint16_t col = active ? C_BAR : C_BAR_OFF;
 
-    // Step values are bipolar around the centre (they modulate a destination),
-    // so the bar grows up or down from the mid-line. A step at 0.5 is "no
-    // modulation" and correctly draws as nothing.
+    // UNIPOLAR: the bar grows from the baseline; its height IS the value —
+    // what the finger taps is what it gets. (The bipolar mid-line drawing was
+    // faithful to "0.5 = no modulation" but made the grid hard to edit by
+    // eye: half-value taps produced near-empty bars.)
+    const int16_t h = static_cast<int16_t>(v * static_cast<float>(kGridH));
+    if (h > 0) {
+        gfx_->fillRect(x, static_cast<int16_t>(B - h), kBarW, h, col);
+    }
+
+    // The mid-line stays as a REFERENCE: on bipolar destinations 0.5 is "no
+    // modulation", and a half-height bar sitting exactly on the line reads
+    // that way at a glance. Drawn over the bar so it shows either way.
     const int16_t mid = static_cast<int16_t>(kGridY + kGridH / 2);
     gfx_->drawFastHLine(x, mid, kBarW, C_CENTRE);
 
-    const float   d = v - 0.5f;
-    const int16_t h = static_cast<int16_t>(fabsf(d) * static_cast<float>(kGridH));
-    if (h > 0) {
-        if (d > 0.0f) gfx_->fillRect(x, static_cast<int16_t>(mid - h), kBarW, h, col);
-        else          gfx_->fillRect(x, mid, kBarW, h, col);
-    }
-
-    // The playhead is drawn as a full-height outline rather than a fill: it must
-    // be visible even on a step whose value is centred (and therefore has no bar
-    // at all), or the sequencer would appear to skip steps.
+    // Both outlines sit INSIDE the bar rect. The focus outline used to be
+    // drawn one pixel OUTSIDE it — outside the erase above — so leaving a
+    // step stranded a yellow halo on screen that nothing ever cleared.
     if (isHead)  gfx_->drawRect(x, kGridY, kBarW, kGridH, C_HEAD);
-    if (isFocus) gfx_->drawRect(static_cast<int16_t>(x - 1),
-                                static_cast<int16_t>(kGridY - 1),
-                                static_cast<int16_t>(kBarW + 2),
-                                static_cast<int16_t>(kGridH + 2), C_FOCUS);
+    if (isFocus) gfx_->drawRect(x, kGridY, kBarW, kGridH, C_FOCUS);
 
     gfx_->drawFastHLine(x, B, kBarW, C_GRID);
 }

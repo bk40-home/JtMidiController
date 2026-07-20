@@ -8,6 +8,16 @@ using JT::Params::Type;
 
 namespace {
 void nrpnTrampoline(uint16_t paramId, float t, void* ctx) {
+    // 0x3FFF is the engine's STATUS word (voice mask / playhead / running),
+    // not a parameter — reserved by ParamBroadcast on the firmware side.
+    // The receiver hands us norm; the exact 14-bit payload is recovered by
+    // rounding (float carries 14 bits losslessly), keeping the shared wire
+    // class untouched.
+    if (paramId == JtView::kStatusAddr) {
+        static_cast<ViewController*>(ctx)->applyStatus(
+            static_cast<uint16_t>(lroundf(t * 16383.0f)));
+        return;
+    }
     static_cast<ViewController*>(ctx)->store().setQuietById(paramId, t);
 }
 } // anonymous namespace
@@ -32,6 +42,14 @@ void ViewController::begin(JtParam::CcSink sink, Arduino_GFX* gfx) {
     page_ = 0;
     sub_  = 0;
 
+    // Resolved ONCE: ordinalOf is a linear table walk, and the SEQ edit-row
+    // sync below runs every loop frame.
+    ordSeqSel_ = JtParam::ordinalOf(JT::Params::ID::SEQ_STEP_SELECT);
+    ordSeqVal_ = JtParam::ordinalOf(JT::Params::ID::SEQ_STEP_VALUE);
+    ordMasterVol_ = JtParam::ordinalOf(JT::Params::ID::MASTER_VOLUME);
+
+    home_.begin(gfx);
+
     // The ONE deliberate full-screen blit, at boot, before the loop is
     // latency-sensitive. Everything after this is partial by construction.
     if (gfx_) gfx_->fillScreen(0x0000);
@@ -52,6 +70,7 @@ void ViewController::invalidateContent() {
     env_.invalidate();
     seq_.invalidate();
     filt_.invalidate();
+    home_.invalidate();
 }
 
 void ViewController::repairRect(int16_t x, int16_t y, int16_t w, int16_t h) {
@@ -257,7 +276,40 @@ void ViewController::update(Angle8Unit& angle, Encoder8Unit& encoder,
         if (refreshRows()) invalidateContent();
     }
 
+    syncSeqEditRows();
+
     flushDirty();
+}
+
+void ViewController::syncSeqEditRows() {
+    if (JtNav::page(page_).kind != JtNav::PageKind::Sequencer) {
+        seqSelStep_ = 0xFF;   // re-sync on the next visit
+        return;
+    }
+
+    const uint8_t sel = static_cast<uint8_t>(
+        lroundf(store_.get(ordSeqSel_) * 15.0f));
+
+    if (sel != seqSelStep_) {
+        // Selecting a step is a READ, not a write: load its value into the
+        // VAL row quietly (no dirty mark, no NRPN — the engine already moved
+        // its edit cursor when the SEL write itself was flushed). Stamping
+        // the PREVIOUS step's value onto the new one here would corrupt the
+        // pattern just by browsing it.
+        store_.setQuiet(ordSeqVal_, seq_.step(sel));
+        // setQuiet marks nothing dirty, so the normal per-write retarget
+        // never runs — refresh the pot targets here or the pot bound to the
+        // VAL row would still be seeking the PREVIOUS step's value.
+        retargetPickup();
+        seqSelStep_ = sel;
+        return;
+    }
+
+    // Same step, VAL moved (pot, drag, encoder push/rotate, or an inbound
+    // NRPN edit): write it through to the grid so the bar follows the
+    // fine-tune live. The engine hears it via the normal dirty flush.
+    const float v = store_.get(ordSeqVal_);
+    if (!(v == seq_.step(sel))) seq_.setStep(sel, v);
 }
 
 void ViewController::flushDirty() {
@@ -317,9 +369,36 @@ void ViewController::render() {
             break;
 
         case JtNav::PageKind::Sequencer:
-            if (gfxReady) seq_.draw(store_, /*playHead=*/0xFF, focusRow_);
+            // The highlighted bar is the SELECTED STEP (SEL row / last tap),
+            // not the focused list row. The playhead is the ENGINE's, from
+            // the status feed — 0xFF (no head) while stopped, so a stopped
+            // sequencer never shows a stuck outline.
+            if (gfxReady) seq_.draw(store_,
+                                    seqRunning_ ? playStep_ : 0xFF,
+                                    seqSelStep_);
             list_.drawDirty(rows_, store_, focusRow_, maxY, budget);
             break;
+
+        case JtNav::PageKind::Home: {
+            // HOME owns the whole content area — wait for the erase to
+            // finish rather than gating on the graphic band like the
+            // half-height panels.
+            if (maxY >= JtView::kScreenH) {
+                JtView::HomePanel::State st;
+                st.name    = patchName_;
+                st.slot    = patchSlot_;
+                st.volume  = store_.get(ordMasterVol_);
+                st.mask    = voiceMask_;
+                st.step    = playStep_;
+                st.running = seqRunning_;
+                // 1.5 s: the engine heartbeats status once a second, so a
+                // live wire stays solidly lit and a dead one goes dark
+                // within a glance.
+                st.link    = (millis() - lastRxMs_) < 1500;
+                home_.draw(st);
+            }
+            break;
+        }
 
         case JtNav::PageKind::Filter:
             if (gfxReady) filt_.draw(store_);
@@ -327,7 +406,6 @@ void ViewController::render() {
             break;
 
         case JtNav::PageKind::List:
-        case JtNav::PageKind::Home:
         default:
             list_.drawDirty(rows_, store_, focusRow_, maxY, budget);
             break;
@@ -377,7 +455,10 @@ void ViewController::handleButtons(ByteButtonUnit& buttons) {
                 }
             }
         } else {
-            setPage(i);      // scene switch OFF: 8 buttons, 8 pages — exactly
+            // Buttons map to the eight EDITING pages (1..8) — HOME is page 0,
+            // reached by swipe or menu. This keeps every button exactly where
+            // muscle memory learned it before HOME existed.
+            setPage(static_cast<uint8_t>(i + 1));
         }
         return;
     }
@@ -544,6 +625,19 @@ void ViewController::handleTouch(const TouchInput& touch) {
         touchStartY_ = y;
         touchRow_    = JtView::RowList::kNoRow;
 
+        // HOME volume bar: the finger owns it from the landing frame. It is
+        // an ABSOLUTE control — the bar goes where the finger is — so a tap
+        // sets it and a drag rides it. No dead-zone, no pickup: those exist
+        // to protect RELATIVE edits from jitter, and an absolute fader wants
+        // the opposite (land anywhere, be there).
+        homeVolDrag_ = (JtNav::page(page_).kind == JtNav::PageKind::Home)
+                    && JtView::HomePanel::volumeHit(x, y);
+        if (homeVolDrag_) {
+            store_.set(ordMasterVol_, JtView::HomePanel::volumeFromX(x));
+            touchMoved_ = true;   // never becomes a tap action on release
+            return;
+        }
+
         uint8_t out = 0;
         const JtView::NavBar::Hit h = nav_.hitTest(page_, x, y, out);
 
@@ -555,6 +649,17 @@ void ViewController::handleTouch(const TouchInput& touch) {
                 touchStartV_ = store_.get(rows_.ordinal[r]);
             }
         }
+        return;
+    }
+
+    // ── HOME volume ride ────────────────────────────────────────────────────
+    if (touched && homeVolDrag_) {
+        store_.set(ordMasterVol_, JtView::HomePanel::volumeFromX(x));
+        return;
+    }
+    if (!touched && homeVolDrag_) {
+        homeVolDrag_ = false;
+        touchPrev_   = false;   // consume the release; nothing else to do
         return;
     }
 
@@ -622,6 +727,33 @@ void ViewController::handleTouch(const TouchInput& touch) {
         } else if (h == JtView::NavBar::Hit::SubTab) {
             setSubTab(out);
 
+        } else if (JtNav::page(page_).kind == JtNav::PageKind::Sequencer
+                   && !touchMoved_
+                   && JtView::SeqPanel::stepAt(touchStartX_, touchStartY_)
+                      != 0xFF) {
+            // ── Tap-grid step entry (standing spec: TAP, not drag) ──────────
+            // The tapped bar is the step, the tapped HEIGHT is its value.
+            // Wire order matters and is fixed by the engine's addressing:
+            // step_select FIRST (the address), then step_value (the data).
+            const uint8_t step = JtView::SeqPanel::stepAt(touchStartX_,
+                                                          touchStartY_);
+            const float   v    = JtView::SeqPanel::valueFromY(touchStartY_);
+
+            // step index 0..15 -> norm on the 1..16 Int lattice: (step)/15.
+            store_.setById(JT::Params::ID::SEQ_STEP_SELECT,
+                           static_cast<float>(step) / 15.0f);
+
+            // FORCED write (D-5): painting the same value onto a DIFFERENT
+            // step re-writes step_value with an equal float; the plain set()
+            // would skip the dirty mark and the engine would never hear it,
+            // while the grid happily showed the bar.
+            store_.setForce(JtParam::ordinalOf(JT::Params::ID::SEQ_STEP_VALUE),
+                            v);
+
+            // The panel's 16-entry cache is the UI's view of the pattern (the
+            // store only ever holds the LAST step written — see SeqPanel.h).
+            seq_.setStep(step, v);
+
         } else if (touchRow_ != JtView::RowList::kNoRow && !touchMoved_) {
             // A tap that never moved.
             const uint16_t o = rows_.ordinal[touchRow_];
@@ -661,6 +793,10 @@ void ViewController::commitSelect(uint16_t paramId, uint8_t optionIndex) {
 }
 
 bool ViewController::handleInboundCC(uint8_t cc, uint8_t value) {
+    // ANY inbound CC proves the wire is alive — that is what the LINK dot
+    // shows. Set before parsing: even traffic we do not consume counts.
+    lastRxMs_ = millis();
+
     const bool consumed = rx_.handleCC(cc, value);
     if (consumed) {
         // The Teensy may have changed a visibility dependency. refreshRows()
