@@ -5,6 +5,8 @@
 
 #include <string.h>
 
+#include "HwPalette.h"
+
 namespace {
 
 // One colour per page. 8 pages, 8 buttons — they line up exactly, which is why
@@ -20,8 +22,25 @@ constexpr uint32_t kPageColour[8] = {
     0xF59E0B,   // 7 PERF   amber
 };
 
-constexpr uint32_t kAccent = 0xFF8C00;   // unified orange
-constexpr uint32_t kSeek   = 0xFF2000;   // red — pot has not picked up
+// Identity colours live in HwPalette.h — shared with the on-screen chips so
+// the LED and the chip cannot drift apart. All states are expressed as
+// BRIGHTNESS of the identity colour, never as a different hue: after a page
+// or bank flip every pot is seeking at once, and repainting them all in an
+// alert colour would erase identity exactly when the user is re-finding
+// their knob.
+
+// ── Per-unit write budget ───────────────────────────────────────────────────
+// The M5 units' internal MCUs silently DROP LED writes that arrive in a
+// back-to-back burst — a page change used to issue up to 8 per unit, and the
+// dropped ones left the unit showing stale colours (including its factory
+// rainbow) while our cache believed the write had landed. So: at most this
+// many writes per unit per update; a slot over budget is skipped WITHOUT
+// latching its cache entry, stays dirty, and retries next loop. The loop runs
+// every few ms, so a full 8-LED repaint settles within ~4 updates —
+// imperceptible — and consecutive writes to a unit are now spaced by a whole
+// loop iteration, which is the recovery time these units need. Steady state
+// still costs zero I2C.
+constexpr uint8_t kLedWriteBudget = 2;
 
 } // anonymous namespace
 
@@ -48,7 +67,8 @@ void LedManager::update(const ViewController& view,
     // hardware, so they MUST follow it: page colours in page mode, orange
     // on/off states in toggle mode, dark where no toggle is bound.
     if (buttons.isPresent()) {
-        for (uint8_t i = 0; i < 8; ++i) {
+        uint8_t writes = 0;
+        for (uint8_t i = 0; i < 8 && writes < kLedWriteBudget; ++i) {
             uint32_t c;
             if (view.buttonsToggleMode()) {
                 c = 0;   // dark: no toggle bound -> this button does nothing
@@ -57,7 +77,11 @@ void LedManager::update(const ViewController& view,
                     const JT::Params::ParamDesc* d = view.rowDesc(row);
                     const bool on =
                         d && JtParam::isOn(*d, view.rowValue(row));
-                    c = on ? kAccent : ColorUtils::scaleBrightness(kAccent, 20);
+                    // State by BRIGHTNESS, identity by HUE: bright = on,
+                    // dim = off, both in this button's slot colour so the
+                    // chip on screen still matches either way.
+                    c = on ? JtHw::kSlotColour[i]
+                           : ColorUtils::scaleBrightness(JtHw::kSlotColour[i], 20);
                 }
             } else {
                 // Buttons map to editing pages 1..8 (HOME is page 0, no
@@ -66,53 +90,67 @@ void LedManager::update(const ViewController& view,
                     ? kPageColour[i]
                     : ColorUtils::scaleBrightness(kPageColour[i], 25);
             }
-            if (c != prevBtn_[i]) { buttons.setLed(i, c); prevBtn_[i] = c; }
+            // Latch the cache ONLY on an issued write — see kLedWriteBudget.
+            if (c != prevBtn_[i]) { buttons.setLed(i, c); prevBtn_[i] = c; ++writes; }
         }
     }
 
     // ── Pots: the bound Control::Pot rows of the ACTIVE bank ────────────────
+    // The Angle8 scales the RGB by its OWN brightness parameter inside
+    // setLEDColor (Angle8Unit.cpp), so software-scaling the RGB as well
+    // stacks two attenuations: 20/256 x 40/255 landed at ~2/255 per channel
+    // — indistinguishable from off, which is exactly the bug this replaces.
+    // So the split is: RGB carries the IDENTITY at full value (also keeps the
+    // hue exact — scaling RGB toward black shifts perceived hue on these
+    // LEDs, and hue is what has to match the on-screen chip), and the unit's
+    // brightness parameter carries the pickup STATE: dim while seeking,
+    // bright once the pot has crossed its stored value.
     if (angle.isPresent()) {
-        for (uint8_t i = 0; i < 8; ++i) {
-            uint32_t c = 0;   // dark: unbound -> this pot does nothing
+        constexpr uint8_t kPotBrSeek = 8;    // dim-but-visible: not engaged
+        constexpr uint8_t kPotBrLive = 40;   // the unit's default drive
+        uint8_t writes = 0;
+        for (uint8_t i = 0; i < 8 && writes < kLedWriteBudget; ++i) {
+            uint32_t c  = 0;   // dark: unbound -> this pot does nothing
+            uint8_t  br = 0;
             if (view.potBoundRow(i) != JtView::RowList::kNoRow) {
-                // Red while the pot has not crossed its stored value. This is
-                // the one piece of state the user cannot otherwise see, and not
-                // showing it makes pickup feel like a broken knob.
-                c = view.pickupSeeking(i)
-                  ? kSeek
-                  : ColorUtils::scaleBrightness(kAccent, 70);
+                c  = JtHw::kSlotColour[i];
+                br = view.pickupSeeking(i) ? kPotBrSeek : kPotBrLive;
             }
-            if (c != prevPot_[i]) {
+            // Change-gate on colour AND brightness: the colour only occupies
+            // 24 bits, so the brightness rides in the spare top byte. Without
+            // it, a seek->live transition (same colour, new brightness) would
+            // be swallowed by the cache and the LED would stay dim.
+            const uint32_t key = (static_cast<uint32_t>(br) << 24) | c;
+            if (key != prevPot_[i]) {
                 // Angle8 takes SEPARATE r/g/b bytes, unlike the Encoder8 and
                 // ByteButton which take a packed 0xRRGGBB.
                 angle.setLed(i,
                              static_cast<uint8_t>((c >> 16) & 0xFF),
                              static_cast<uint8_t>((c >>  8) & 0xFF),
-                             static_cast<uint8_t>( c        & 0xFF));
-                prevPot_[i] = c;
+                             static_cast<uint8_t>( c        & 0xFF),
+                             br);
+                prevPot_[i] = key;
+                ++writes;
             }
         }
     }
 
     // ── Encoders: the bound Control::Encoder rows ───────────────────────────
+    // Bound = full slot colour, unbound = dark. Nothing in between: the
+    // Encoder8 has no separate brightness input, and software-scaling the RGB
+    // both dims into invisibility and shifts the hue away from the on-screen
+    // chip (the pot bug's sibling). No state display either — the parameter
+    // table has NO Toggle-typed rows on Encoder control (all toggles are
+    // Control::Switch -> ByteButtons), so the old per-encoder toggle branch
+    // was dead code and is gone.
     if (encoder.isPresent()) {
-        for (uint8_t i = 0; i < 8; ++i) {
-            uint32_t c = 0;
-            const uint8_t row = view.encBoundRow(i);
-
-            if (row != JtView::RowList::kNoRow) {
-                const JT::Params::ParamDesc* d = view.rowDesc(row);
-                if (d && d->type == JT::Params::Type::Toggle) {
-                    // A toggle shows its STATE — the most useful thing an LED
-                    // can do: you can see sync/glide/freeze is on without
-                    // looking at the screen.
-                    const bool on = JtParam::isOn(*d, view.rowValue(row));
-                    c = on ? kAccent : ColorUtils::scaleBrightness(kAccent, 20);
-                } else {
-                    c = ColorUtils::scaleBrightness(kAccent, 70);
-                }
-            }
-            if (c != prevEnc_[i]) { encoder.setLed(i, c); prevEnc_[i] = c; }
+        uint8_t writes = 0;
+        for (uint8_t i = 0; i < 8 && writes < kLedWriteBudget; ++i) {
+            const uint32_t c =
+                (view.encBoundRow(i) != JtView::RowList::kNoRow)
+                    ? JtHw::kSlotColour[i] : 0u;
+            // Latch the cache ONLY on an issued write — see kLedWriteBudget.
+            if (c != prevEnc_[i]) { encoder.setLed(i, c); prevEnc_[i] = c; ++writes; }
         }
     }
 }

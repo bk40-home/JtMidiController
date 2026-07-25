@@ -3,6 +3,8 @@
 // =============================================================================
 #include "ViewController.h"
 
+#include "HwPalette.h"
+
 using JT::Params::ParamDesc;
 using JT::Params::Type;
 
@@ -179,6 +181,7 @@ void ViewController::rebindControls() {
     for (uint8_t i = 0; i < kPotBindSlots; ++i) potBind_[i] = JtView::RowList::kNoRow;
     for (uint8_t i = 0; i < kEncBindSlots; ++i) encBind_[i] = JtView::RowList::kNoRow;
     for (uint8_t i = 0; i < kBtnBindSlots; ++i) btnBind_[i] = JtView::RowList::kNoRow;
+    for (uint8_t i = 0; i < JtNav::kMaxRows;  ++i) rowHw_[i] = JtHw::kHwNone;
 
     uint8_t nPot = 0, nEnc = 0, nBtn = 0;
 
@@ -186,15 +189,36 @@ void ViewController::rebindControls() {
         const ParamDesc* d = JtParam::descAt(rows_.ordinal[i]);
         if (!d) continue;
 
+        // Each bind also records its reverse as a packed tag (HwPalette.h):
+        // physical index 0..7 = palette index, plus the HOLLOW bit when the
+        // control is bound but not REACHABLE right now (pot on the inactive
+        // bank; toggle while the buttons are in page mode). This is why a
+        // bank/mode flip must re-run rebindControls(): only the hollow bits
+        // change, but they live here.
         switch (d->control) {
             case JT::Params::Control::Pot:
-                if (nPot < kPotBindSlots) potBind_[nPot++] = i;
+                if (nPot < kPotBindSlots) {
+                    const bool inactive = (nPot >= 8) != potBank_;
+                    rowHw_[i] = static_cast<uint8_t>(
+                        JtHw::kHwPot | (nPot & 0x07u) |
+                        (inactive ? JtHw::kHwHollow : 0u));
+                    potBind_[nPot++] = i;
+                }
                 break;
             case JT::Params::Control::Encoder:
-                if (nEnc < kEncBindSlots) encBind_[nEnc++] = i;
+                if (nEnc < kEncBindSlots) {
+                    // Encoders have no bank/mode: bound means reachable.
+                    rowHw_[i] = static_cast<uint8_t>(JtHw::kHwEnc | nEnc);
+                    encBind_[nEnc++] = i;
+                }
                 break;
             case JT::Params::Control::Switch:
-                if (nBtn < kBtnBindSlots) btnBind_[nBtn++] = i;
+                if (nBtn < kBtnBindSlots) {
+                    rowHw_[i] = static_cast<uint8_t>(
+                        JtHw::kHwBtn | nBtn |
+                        (btnToggleMode_ ? 0u : JtHw::kHwHollow));
+                    btnBind_[nBtn++] = i;
+                }
                 break;
         }
     }
@@ -262,6 +286,16 @@ void ViewController::update(Angle8Unit& angle, Encoder8Unit& encoder,
     // shortcuts, ON = this tab's toggles. Read once per update so the mode is
     // consistent across handleButtons and the LED pass this frame.
     btnToggleMode_ = encoder.isPresent() && encoder.switchOn();
+
+    // A mode flip changes which button rows are REACHABLE, i.e. the HOLLOW
+    // bit on their chips (rebindControls). Same repaint route as the pot-bank
+    // flip: re-derive tags, mark rows dirty, no band erase. Change-gated so
+    // the steady state costs one bool compare per frame.
+    if (btnToggleMode_ != prevToggleMode_) {
+        prevToggleMode_ = btnToggleMode_;
+        rebindControls();
+        list_.invalidate();
+    }
 
     handleButtons(buttons);
     handlePots(angle);
@@ -364,7 +398,7 @@ void ViewController::render() {
                 if (gfxReady) env_.drawOverlay(store_);
             } else {
                 if (gfxReady) env_.draw(currentSection(), rows_, store_, focusRow_);
-                list_.drawDirty(rows_, store_, focusRow_, maxY, budget);
+                list_.drawDirty(rows_, store_, rowHw_, focusRow_, maxY, budget);
             }
             break;
 
@@ -376,7 +410,7 @@ void ViewController::render() {
             if (gfxReady) seq_.draw(store_,
                                     seqRunning_ ? playStep_ : 0xFF,
                                     seqSelStep_);
-            list_.drawDirty(rows_, store_, focusRow_, maxY, budget);
+            list_.drawDirty(rows_, store_, rowHw_, focusRow_, maxY, budget);
             break;
 
         case JtNav::PageKind::Home: {
@@ -402,12 +436,12 @@ void ViewController::render() {
 
         case JtNav::PageKind::Filter:
             if (gfxReady) filt_.draw(store_);
-            list_.drawDirty(rows_, store_, focusRow_, maxY, budget);
+            list_.drawDirty(rows_, store_, rowHw_, focusRow_, maxY, budget);
             break;
 
         case JtNav::PageKind::List:
         default:
-            list_.drawDirty(rows_, store_, focusRow_, maxY, budget);
+            list_.drawDirty(rows_, store_, rowHw_, focusRow_, maxY, budget);
             break;
     }
 }
@@ -479,6 +513,13 @@ void ViewController::handlePots(Angle8Unit& angle) {
     const bool bank = angle.switchOn();
     if (bank != potBank_) {
         potBank_ = bank;
+        // Re-derive the row->hardware tags: the flip swaps which pot rows are
+        // HOLLOW (see rebindControls). Then mark every row dirty so the chips
+        // repaint — a plain invalidate(), NOT invalidateContent(): each row
+        // repaints over its own rect, no band erase needed, and a bank flip
+        // is a rare, user-initiated event so the ~18-row repaint is fine.
+        rebindControls();
+        list_.invalidate();
         reseedPickup();
     }
 

@@ -189,6 +189,14 @@ private:
     uint8_t btnBind_[kBtnBindSlots] = {};
     bool    potBank_       = false;   // Angle8 switch: false = rows 1-8
     bool    btnToggleMode_ = false;   // Encoder8 scene switch, read per update
+    bool    prevToggleMode_ = false;  // last value seen, to catch the flip
+
+    // The REVERSE of the maps above: row index -> packed hardware tag (see
+    // HwPalette.h), so RowList can draw each row's identity chip in the same
+    // colour LedManager puts on the physical control. Rebuilt by
+    // rebindControls(); also re-derived on a pot-bank or toggle-mode flip,
+    // because those change only the HOLLOW bit (reachable vs not).
+    uint8_t rowHw_[JtNav::kMaxRows] = {};
 
     uint8_t focusRow_    = JtView::RowList::kNoRow;
     const char* patchName_ = "INIT";

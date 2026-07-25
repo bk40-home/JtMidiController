@@ -82,8 +82,17 @@ public:
     uint8_t perColumn() const { return graphical_ ? kGfxRowsPerCol : kRowsPerCol; }
 
     // Full repaint of the row area.
+    //
+    // rowHw (here and in drawDirty/drawRow): one packed tag per row, built by
+    // ViewController::rebindControls() — which physical control drives the
+    // row, as a palette index + a HOLLOW bit (see HwPalette.h). Drawn as a
+    // small colour chip left of the label, in the SAME colour LedManager puts
+    // on the control's LED: match chip to knob by eye, no counting. May be
+    // nullptr (no chips). The tags carry no per-frame state, so they add
+    // nothing to the dirty test — a tag only changes together with a row-set,
+    // bank or mode change, all of which already invalidate().
     void drawAll(const JtNav::RowSet& rows, const JtParam::Store& store,
-                 uint8_t focusRow);
+                 const uint8_t* rowHw, uint8_t focusRow);
 
     // Repaint only the rows whose value (or focus) changed. The per-frame path:
     // an idle frame issues ZERO draw calls.
@@ -94,8 +103,8 @@ public:
     // its stale cache entry ON PURPOSE, so it still reads as dirty next frame
     // and completes then. Returns true while any dirty row remains deferred.
     bool drawDirty(const JtNav::RowSet& rows, const JtParam::Store& store,
-                   uint8_t focusRow, int16_t maxY = kScreenH,
-                   uint8_t budget = 255);
+                   const uint8_t* rowHw, uint8_t focusRow,
+                   int16_t maxY = kScreenH, uint8_t budget = 255);
 
     // Forget the cache. MUST be called on any sub-tab or page change, and after
     // any change to which rows are VISIBLE — the cache is keyed by row slot, so
@@ -122,7 +131,8 @@ private:
     bool graphical_ = false;
 
     void drawRow(const JtNav::RowSet& rows, uint8_t idx,
-                 const JtParam::Store& store, bool focused);
+                 const JtParam::Store& store, const uint8_t* rowHw,
+                 bool focused);
 
     void rowRect(uint8_t idx, int16_t& x, int16_t& y) const;
 };

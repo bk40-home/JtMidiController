@@ -5,6 +5,8 @@
 
 #include <math.h>
 
+#include "HwPalette.h"
+
 namespace JtView {
 namespace {
 
@@ -18,6 +20,16 @@ constexpr uint16_t C_ACCENT  = 0xFC00;   // orange    — focus
 constexpr uint16_t C_BAR     = 0x4200;   // dark orange — the focused row's bar
 constexpr uint16_t C_FOCUSBG = 0x2140;   // focused row background
 constexpr uint16_t C_RULE    = 0x18E3;   // hairline between rows
+
+// ── Hardware identity chip ──────────────────────────────────────────────────
+// A small square left of the label, in the bound control's palette colour
+// (HwPalette.h) — the same colour LedManager puts on that control's LED.
+// Filled = turn/press it now; outline = bound, but behind a bank/mode switch.
+// The label shifts right to make room ONLY when chips can exist at all, so
+// nothing changes on rows that never had hardware.
+constexpr int16_t kChipX    = 4;   // left inset of the chip
+constexpr int16_t kChipSize = 8;   // 8x8: readable at arm's length, cheap
+constexpr int16_t kLabelX   = kChipX + kChipSize + 6;   // label start (18)
 
 } // anonymous namespace
 
@@ -76,7 +88,7 @@ uint8_t RowList::rowAt(const JtNav::RowSet& rows, int16_t x, int16_t y) const {
 // ─────────────────────────────────────────────────────────────────────────────
 
 void RowList::drawAll(const JtNav::RowSet& rows, const JtParam::Store& store,
-                      uint8_t focusRow) {
+                      const uint8_t* rowHw, uint8_t focusRow) {
     if (!gfx_) return;
 
     // Clear ONLY the row band. On a graphical page the curve lives above
@@ -89,14 +101,15 @@ void RowList::drawAll(const JtNav::RowSet& rows, const JtParam::Store& store,
                         static_cast<int16_t>(kScreenH - y0), C_RULE);
 
     for (uint8_t i = 0; i < rows.count; ++i) {
-        drawRow(rows, i, store, i == focusRow);
+        drawRow(rows, i, store, rowHw, i == focusRow);
         lastVal_[i] = store.get(rows.ordinal[i]);
     }
     lastFocus_ = focusRow;
 }
 
 bool RowList::drawDirty(const JtNav::RowSet& rows, const JtParam::Store& store,
-                        uint8_t focusRow, int16_t maxY, uint8_t budget) {
+                        const uint8_t* rowHw, uint8_t focusRow,
+                        int16_t maxY, uint8_t budget) {
     if (!gfx_) return false;
 
     const int16_t rh = rowHeight();
@@ -122,7 +135,7 @@ bool RowList::drawDirty(const JtNav::RowSet& rows, const JtParam::Store& store,
             continue;
         }
 
-        drawRow(rows, i, store, i == focusRow);
+        drawRow(rows, i, store, rowHw, i == focusRow);
         lastVal_[i] = v;
         --budget;
     }
@@ -135,7 +148,8 @@ bool RowList::drawDirty(const JtNav::RowSet& rows, const JtParam::Store& store,
 }
 
 void RowList::drawRow(const JtNav::RowSet& rows, uint8_t idx,
-                      const JtParam::Store& store, bool focused) {
+                      const JtParam::Store& store, const uint8_t* rowHw,
+                      bool focused) {
     const ParamDesc* d = JtParam::descAt(rows.ordinal[idx]);
     if (!d) return;
 
@@ -169,6 +183,49 @@ void RowList::drawRow(const JtNav::RowSet& rows, uint8_t idx,
 
     gfx_->drawFastHLine(x, static_cast<int16_t>(y + rh - 1), kColW, C_RULE);
 
+    // ── Hardware identity chip ──────────────────────────────────────────────
+    // Drawn AFTER the focus bar so it stays visible on top of it. No cache of
+    // its own: a tag only changes together with events that already
+    // invalidate() the whole row set (rebind, bank flip, mode flip), so the
+    // existing dirty path repaints it for free. Idle frames still cost zero.
+    const uint8_t tag = rowHw ? rowHw[idx] : JtHw::kHwNone;
+    if (tag != JtHw::kHwNone) {
+        const uint16_t cc = JtHw::kSlotColour565[JtHw::hwIndex(tag)];
+        // The chip's SHAPE is the control TYPE — square = pot, circle =
+        // encoder, triangle = button — because one tab can bind the same
+        // palette index on two different units (cyan pot AND cyan encoder),
+        // and colour alone cannot tell them apart. Filled = reachable now;
+        // outline = bound but behind its bank/mode switch.
+        const bool    hollow = JtHw::hwHollow(tag);
+        const int16_t half   = kChipSize / 2;
+        const int16_t cx     = static_cast<int16_t>(x + kChipX + half);
+        const int16_t cyc    = static_cast<int16_t>(y + rh / 2);
+        switch (JtHw::hwType(tag)) {
+            case JtHw::kHwPot:
+                if (hollow) gfx_->drawRect(static_cast<int16_t>(cx - half),
+                                           static_cast<int16_t>(cyc - half),
+                                           kChipSize, kChipSize, cc);
+                else        gfx_->fillRect(static_cast<int16_t>(cx - half),
+                                           static_cast<int16_t>(cyc - half),
+                                           kChipSize, kChipSize, cc);
+                break;
+            case JtHw::kHwEnc:
+                if (hollow) gfx_->drawCircle(cx, cyc, half, cc);
+                else        gfx_->fillCircle(cx, cyc, half, cc);
+                break;
+            default:   // kHwBtn
+                if (hollow) gfx_->drawTriangle(
+                        cx, static_cast<int16_t>(cyc - half),
+                        static_cast<int16_t>(cx - half), static_cast<int16_t>(cyc + half),
+                        static_cast<int16_t>(cx + half), static_cast<int16_t>(cyc + half), cc);
+                else        gfx_->fillTriangle(
+                        cx, static_cast<int16_t>(cyc - half),
+                        static_cast<int16_t>(cx - half), static_cast<int16_t>(cyc + half),
+                        static_cast<int16_t>(cx + half), static_cast<int16_t>(cyc + half), cc);
+                break;
+        }
+    }
+
     // ── Text ────────────────────────────────────────────────────────────────
     // TRANSPARENT glyphs on the focused row, opaque elsewhere.
     //
@@ -187,7 +244,7 @@ void RowList::drawRow(const JtNav::RowSet& rows, uint8_t idx,
     gfx_->setTextSize(1);
     if (overBar) gfx_->setTextColor(C_ACCENT);
     else         gfx_->setTextColor(C_LABEL, bg);
-    gfx_->setCursor(static_cast<int16_t>(x + 8),
+    gfx_->setCursor(static_cast<int16_t>(x + kLabelX),
                     static_cast<int16_t>(y + rh / 2 - 4));
     gfx_->print(d->label);
 
