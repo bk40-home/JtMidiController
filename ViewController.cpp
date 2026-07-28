@@ -48,6 +48,8 @@ void ViewController::begin(JtParam::CcSink sink, Arduino_GFX* gfx) {
     // sync below runs every loop frame.
     ordSeqSel_ = JtParam::ordinalOf(JT::Params::ID::SEQ_STEP_SELECT);
     ordSeqVal_ = JtParam::ordinalOf(JT::Params::ID::SEQ_STEP_VALUE);
+    ordSeqAuxSel_ = JtParam::ordinalOf(JT::Params::ID::SEQ_AUX_STEP_SELECT);
+    ordSeqAuxVal_ = JtParam::ordinalOf(JT::Params::ID::SEQ_AUX_STEP_VALUE);
     ordMasterVol_ = JtParam::ordinalOf(JT::Params::ID::MASTER_VOLUME);
 
     home_.begin(gfx);
@@ -138,6 +140,32 @@ bool ViewController::refreshRows() {
         fresh.count = 0;            // ENV overlay: no rows, just three curves
     } else {
         JtNav::collectRows(sec, store_, fresh);
+    }
+
+    // Sequencer lane filter (Stage B/C/D): the SEQ page hosts two lanes on one
+    // set of rows.  The clock/global rows are shared, but the per-lane
+    // dest/depth/step params must show only for the ACTIVE lane — otherwise
+    // both lanes' controls pile up and the aux (group 4) rows bleed over the
+    // grid.  Drop the inactive lane's four exclusive params here.
+    if (k == JtNav::PageKind::Sequencer) {
+        const bool aux = (seq_.lane() == JtView::SeqPanel::Lane::Aux);
+        JtNav::RowSet filt{};
+        for (uint8_t i = 0; i < fresh.count; ++i) {
+            const ParamDesc* dp = JtParam::descAt(fresh.ordinal[i]);
+            if (!dp) { filt.ordinal[filt.count++] = fresh.ordinal[i]; continue; }
+            const uint16_t id = dp->id;
+            const bool gateOnly = (id == JT::Params::ID::SEQ_DESTINATION
+                                || id == JT::Params::ID::SEQ_DEPTH
+                                || id == JT::Params::ID::SEQ_STEP_SELECT
+                                || id == JT::Params::ID::SEQ_STEP_VALUE);
+            const bool auxOnly  = (id == JT::Params::ID::SEQ_AUX_DESTINATION
+                                || id == JT::Params::ID::SEQ_AUX_DEPTH
+                                || id == JT::Params::ID::SEQ_AUX_STEP_SELECT
+                                || id == JT::Params::ID::SEQ_AUX_STEP_VALUE);
+            if (aux ? gateOnly : auxOnly) continue;   // hide the inactive lane's
+            filt.ordinal[filt.count++] = fresh.ordinal[i];
+        }
+        fresh = filt;
     }
 
     // Compare by CONTENT. Same set -> nothing to invalidate; keep the pots
@@ -321,8 +349,14 @@ void ViewController::syncSeqEditRows() {
         return;
     }
 
+    // Which SEL/VAL param pair the grid drives depends on the active lane —
+    // the gate lane uses SEQ_STEP_*, the aux lane SEQ_AUX_STEP_* (Stage B/C/D).
+    const bool aux = (seq_.lane() == JtView::SeqPanel::Lane::Aux);
+    const uint16_t ordSel = aux ? ordSeqAuxSel_ : ordSeqSel_;
+    const uint16_t ordVal = aux ? ordSeqAuxVal_ : ordSeqVal_;
+
     const uint8_t sel = static_cast<uint8_t>(
-        lroundf(store_.get(ordSeqSel_) * 15.0f));
+        lroundf(store_.get(ordSel) * 15.0f));
 
     if (sel != seqSelStep_) {
         // Selecting a step is a READ, not a write: load its value into the
@@ -330,7 +364,7 @@ void ViewController::syncSeqEditRows() {
         // its edit cursor when the SEL write itself was flushed). Stamping
         // the PREVIOUS step's value onto the new one here would corrupt the
         // pattern just by browsing it.
-        store_.setQuiet(ordSeqVal_, seq_.step(sel));
+        store_.setQuiet(ordVal, seq_.step(sel));   // seq_.step() reads active lane
         // setQuiet marks nothing dirty, so the normal per-write retarget
         // never runs — refresh the pot targets here or the pot bound to the
         // VAL row would still be seeking the PREVIOUS step's value.
@@ -342,8 +376,18 @@ void ViewController::syncSeqEditRows() {
     // Same step, VAL moved (pot, drag, encoder push/rotate, or an inbound
     // NRPN edit): write it through to the grid so the bar follows the
     // fine-tune live. The engine hears it via the normal dirty flush.
-    const float v = store_.get(ordSeqVal_);
+    const float v = store_.get(ordVal);
     if (!(v == seq_.step(sel))) seq_.setStep(sel, v);
+}
+
+// Called when the seq page button toggles the edit lane: force the mirror to
+// re-sync (the SEL cursor and VAL row now belong to the other lane) and
+// repaint (the grid shows the other cache in the other colour).
+void ViewController::syncSeqLaneRows(JtView::SeqPanel::Lane /*lane*/) {
+    seqSelStep_ = 0xFF;        // force syncSeqEditRows to reload SEL/VAL next frame
+    seq_.invalidate();         // full grid repaint in the new lane's colour
+    refreshRows();             // rebuild the visible row set for the new lane
+    invalidateContent();       // flush — the row set and grid both changed
 }
 
 void ViewController::flushDirty() {
@@ -492,7 +536,21 @@ void ViewController::handleButtons(ByteButtonUnit& buttons) {
             // Buttons map to the eight EDITING pages (1..8) — HOME is page 0,
             // reached by swipe or menu. This keeps every button exactly where
             // muscle memory learned it before HOME existed.
-            setPage(static_cast<uint8_t>(i + 1));
+            const uint8_t target = static_cast<uint8_t>(i + 1);
+
+            // Pressing the CURRENT page's own button is normally a no-op
+            // (setPage early-returns on p==page_).  On the Sequencer page we
+            // repurpose that dead press to toggle the gate/aux edit lane —
+            // "press where you already are to switch lane".  The GRID shows
+            // which lane is active by its bar colour (orange gate / cyan aux).
+            // A matching button-LED tint is deferred (needs a LedManager pass).
+            if (target == page_
+                && JtNav::page(page_).kind == JtNav::PageKind::Sequencer) {
+                const JtView::SeqPanel::Lane l = seq_.toggleLane();
+                syncSeqLaneRows(l);          // point SEL/VAL mirror at the lane
+            } else {
+                setPage(target);
+            }
         }
         return;
     }
@@ -780,19 +838,27 @@ void ViewController::handleTouch(const TouchInput& touch) {
                                                           touchStartY_);
             const float   v    = JtView::SeqPanel::valueFromY(touchStartY_);
 
+            // Active lane picks the target param pair (gate: SEQ_STEP_*, aux:
+            // SEQ_AUX_STEP_* — Stage B/C/D).
+            const bool auxLane = (seq_.lane() == JtView::SeqPanel::Lane::Aux);
+            const uint16_t selId = auxLane ? JT::Params::ID::SEQ_AUX_STEP_SELECT
+                                           : JT::Params::ID::SEQ_STEP_SELECT;
+            const uint16_t valId = auxLane ? JT::Params::ID::SEQ_AUX_STEP_VALUE
+                                           : JT::Params::ID::SEQ_STEP_VALUE;
+
             // step index 0..15 -> norm on the 1..16 Int lattice: (step)/15.
-            store_.setById(JT::Params::ID::SEQ_STEP_SELECT,
-                           static_cast<float>(step) / 15.0f);
+            // Wire order matters: step_select FIRST (address), then value.
+            store_.setById(selId, static_cast<float>(step) / 15.0f);
 
             // FORCED write (D-5): painting the same value onto a DIFFERENT
             // step re-writes step_value with an equal float; the plain set()
             // would skip the dirty mark and the engine would never hear it,
             // while the grid happily showed the bar.
-            store_.setForce(JtParam::ordinalOf(JT::Params::ID::SEQ_STEP_VALUE),
-                            v);
+            store_.setForce(JtParam::ordinalOf(valId), v);
 
             // The panel's 16-entry cache is the UI's view of the pattern (the
-            // store only ever holds the LAST step written — see SeqPanel.h).
+            // store only ever holds the LAST step written).  setStep() writes
+            // the ACTIVE lane's cache.
             seq_.setStep(step, v);
 
         } else if (touchRow_ != JtView::RowList::kNoRow && !touchMoved_) {

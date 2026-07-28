@@ -246,6 +246,8 @@ private:
     uint8_t  seqSelStep_ = 0xFF;        // 0xFF = not yet synced on this page
     uint16_t ordSeqSel_  = 0xFFFF;      // ordinals resolved once in begin();
     uint16_t ordSeqVal_  = 0xFFFF;      // the sync runs every loop frame
+    uint16_t ordSeqAuxSel_ = 0xFFFF;    // aux-lane SEL/VAL ordinals (Stage B/C/D)
+    uint16_t ordSeqAuxVal_ = 0xFFFF;
 
     void handleButtons(ByteButtonUnit& buttons);
     void handlePots(Angle8Unit& angle);
@@ -259,6 +261,7 @@ private:
     // Keep the SEL/VAL rows and the grid telling one story — see the member
     // note above. Called once per update(), cheap when nothing changed.
     void syncSeqEditRows();
+    void syncSeqLaneRows(JtView::SeqPanel::Lane lane);
 
     // Recollect the visible rows. Returns true only if the visible SET changed
     // — compared by CONTENT, not count, because a visible_when flip can swap
