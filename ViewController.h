@@ -248,6 +248,8 @@ private:
     uint16_t ordSeqVal_  = 0xFFFF;      // the sync runs every loop frame
     uint16_t ordSeqAuxSel_ = 0xFFFF;    // aux-lane SEL/VAL ordinals (Stage B/C/D)
     uint16_t ordSeqAuxVal_ = 0xFFFF;
+    uint16_t ordArpSel_    = 0xFFFF;    // arp accent-lane SEL/ACCENT ordinals (Phase 9)
+    uint16_t ordArpAcc_    = 0xFFFF;
 
     void handleButtons(ByteButtonUnit& buttons);
     void handlePots(Angle8Unit& angle);

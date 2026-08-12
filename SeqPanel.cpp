@@ -15,6 +15,7 @@ constexpr uint16_t C_BG      = 0x0000;
 constexpr uint16_t C_GRID    = 0x2124;
 constexpr uint16_t C_BAR     = 0xFC00;   // orange — an active GATE-lane step
 constexpr uint16_t C_BAR_AUX = 0x07FF;   // cyan   — an active AUX-lane step (D-U1)
+constexpr uint16_t C_BAR_ARP = 0xF81F;   // magenta — an active ARP accent step (Phase 9)
 constexpr uint16_t C_BAR_OFF = 0x4A49;   // grey   — beyond seq.steps
 constexpr uint16_t C_HEAD    = 0xFFFF;   // white  — the sounding step
 constexpr uint16_t C_FOCUS   = 0xFFE0;   // yellow — the step being edited
@@ -49,17 +50,23 @@ void SeqPanel::setAllSteps(const float* v16) {
 }
 
 // Lane-explicit variants (patch load refreshes both caches) ------------------
+// Cache selector — 3-way (Gate/Aux/Arp), used by every lane-explicit method so
+// the arp cache is never accidentally routed to the gate array.
+float* SeqPanel::cacheFor(Lane l) {
+    return l == Lane::Aux ? auxSteps_ : l == Lane::Arp ? arpSteps_ : steps_;
+}
+
 void SeqPanel::setStepFor(Lane l, uint8_t s, float v) {
     if (s >= kSteps) return;
     if (v < 0.0f) v = 0.0f;
     if (v > 1.0f) v = 1.0f;
-    ((l == Lane::Aux) ? auxSteps_ : steps_)[s] = v;
+    cacheFor(l)[s] = v;
     if (l == lane_) dirty_ = true;                 // repaint only if visible
 }
 
 void SeqPanel::setAllStepsFor(Lane l, const float* v16) {
     if (!v16) return;
-    float* dst = (l == Lane::Aux) ? auxSteps_ : steps_;
+    float* dst = cacheFor(l);
     for (uint8_t i = 0; i < kSteps; ++i) {
         float v = v16[i];
         if (v < 0.0f) v = 0.0f;
@@ -71,7 +78,7 @@ void SeqPanel::setAllStepsFor(Lane l, const float* v16) {
 
 float SeqPanel::stepFor(Lane l, uint8_t s) const {
     if (s >= kSteps) return 0.0f;
-    return ((l == Lane::Aux) ? auxSteps_ : steps_)[s];
+    return (l == Lane::Aux ? auxSteps_ : l == Lane::Arp ? arpSteps_ : steps_)[s];
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -113,7 +120,8 @@ void SeqPanel::drawBar(uint8_t i, float v, uint8_t activeCount,
     // not played. Drawn grey rather than hidden, so shortening the pattern does
     // not look like the steps were destroyed.
     const bool active = (i < activeCount);
-    const uint16_t barCol = (lane_ == Lane::Aux) ? C_BAR_AUX : C_BAR;   // D-U1
+    const uint16_t barCol = (lane_ == Lane::Aux) ? C_BAR_AUX
+                          : (lane_ == Lane::Arp) ? C_BAR_ARP : C_BAR;   // D-U1 / Phase 9
     const uint16_t col = active ? barCol : C_BAR_OFF;
 
     // UNIPOLAR: the bar grows from the baseline; its height IS the value —

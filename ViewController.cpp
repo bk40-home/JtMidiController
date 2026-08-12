@@ -50,6 +50,10 @@ void ViewController::begin(JtParam::CcSink sink, Arduino_GFX* gfx) {
     ordSeqVal_ = JtParam::ordinalOf(JT::Params::ID::SEQ_STEP_VALUE);
     ordSeqAuxSel_ = JtParam::ordinalOf(JT::Params::ID::SEQ_AUX_STEP_SELECT);
     ordSeqAuxVal_ = JtParam::ordinalOf(JT::Params::ID::SEQ_AUX_STEP_VALUE);
+    // Phase 9: the arp lane drives the ACCENT lane on the shared grid — SELECT
+    // then ACCENT, exactly like the seq gate/aux SEL/VAL pairs.
+    ordArpSel_ = JtParam::ordinalOf(JT::Params::ID::ARP_STEP_SELECT);
+    ordArpAcc_ = JtParam::ordinalOf(JT::Params::ID::ARP_STEP_ACCENT);
     ordMasterVol_ = JtParam::ordinalOf(JT::Params::ID::MASTER_VOLUME);
 
     home_.begin(gfx);
@@ -110,6 +114,15 @@ bool ViewController::isOverlayTab() const {
 uint8_t ViewController::currentSection() const {
     if (isOverlayTab()) return 0xFF;
     const JtNav::Page& pg = JtNav::page(page_);
+    // Phase 9: the SEQ page's third flip state (Arp) shows section 17, not the
+    // sequencer's section 13 — same page, same grid, different param set.
+    if (pg.kind == JtNav::PageKind::Sequencer
+        && seq_.lane() == JtView::SeqPanel::Lane::Arp) {
+        // Section 17 == Arpeggiator (params.yaml / regenerated ParamTable
+        // kSectionNames[17]).  The table exposes no named section constant, so
+        // the index is a literal — kept in one place behind this accessor.
+        return 17;
+    }
     const uint8_t s = (sub_ < pg.subCount) ? sub_ : 0;
     return pg.subs[s].section;
 }
@@ -148,6 +161,23 @@ bool ViewController::refreshRows() {
     // both lanes' controls pile up and the aux (group 4) rows bleed over the
     // grid.  Drop the inactive lane's four exclusive params here.
     if (k == JtNav::PageKind::Sequencer) {
+        const JtView::SeqPanel::Lane ln = seq_.lane();
+        // Phase 9: on the Arp flip state the section is 17, so `fresh` already
+        // holds only arp rows.  The grid drives ARP_STEP_SELECT + ACCENT, so
+        // hide those two from the list; ARP_STEP_ONOFF and ARP_STEP_RATCHET
+        // stay as list rows (this pass's low-risk substitute for a tri-lane
+        // grid).  For the gate/aux lanes the original StageB/C/D filter runs.
+        if (ln == JtView::SeqPanel::Lane::Arp) {
+            JtNav::RowSet filt{};
+            for (uint8_t i = 0; i < fresh.count; ++i) {
+                const ParamDesc* dp = JtParam::descAt(fresh.ordinal[i]);
+                if (dp && (dp->id == JT::Params::ID::ARP_STEP_SELECT
+                        || dp->id == JT::Params::ID::ARP_STEP_ACCENT))
+                    continue;   // grid's job, not a list row
+                filt.ordinal[filt.count++] = fresh.ordinal[i];
+            }
+            fresh = filt;
+        } else {
         const bool aux = (seq_.lane() == JtView::SeqPanel::Lane::Aux);
         JtNav::RowSet filt{};
         for (uint8_t i = 0; i < fresh.count; ++i) {
@@ -166,6 +196,7 @@ bool ViewController::refreshRows() {
             filt.ordinal[filt.count++] = fresh.ordinal[i];
         }
         fresh = filt;
+        }   // end gate/aux lane filter (Phase 9 arp lane handled above)
     }
 
     // Compare by CONTENT. Same set -> nothing to invalidate; keep the pots
@@ -350,10 +381,13 @@ void ViewController::syncSeqEditRows() {
     }
 
     // Which SEL/VAL param pair the grid drives depends on the active lane —
-    // the gate lane uses SEQ_STEP_*, the aux lane SEQ_AUX_STEP_* (Stage B/C/D).
-    const bool aux = (seq_.lane() == JtView::SeqPanel::Lane::Aux);
-    const uint16_t ordSel = aux ? ordSeqAuxSel_ : ordSeqSel_;
-    const uint16_t ordVal = aux ? ordSeqAuxVal_ : ordSeqVal_;
+    // gate uses SEQ_STEP_*, aux uses SEQ_AUX_STEP_*, arp uses ARP_STEP_SELECT +
+    // ARP_STEP_ACCENT (the grid edits the accent lane; on/off & ratchet are
+    // list rows).  All three are the same select-then-value protocol.
+    const JtView::SeqPanel::Lane ln = seq_.lane();
+    uint16_t ordSel = ordSeqSel_, ordVal = ordSeqVal_;
+    if (ln == JtView::SeqPanel::Lane::Aux) { ordSel = ordSeqAuxSel_; ordVal = ordSeqAuxVal_; }
+    else if (ln == JtView::SeqPanel::Lane::Arp) { ordSel = ordArpSel_; ordVal = ordArpAcc_; }
 
     const uint8_t sel = static_cast<uint8_t>(
         lroundf(store_.get(ordSel) * 15.0f));
@@ -839,12 +873,18 @@ void ViewController::handleTouch(const TouchInput& touch) {
             const float   v    = JtView::SeqPanel::valueFromY(touchStartY_);
 
             // Active lane picks the target param pair (gate: SEQ_STEP_*, aux:
-            // SEQ_AUX_STEP_* — Stage B/C/D).
-            const bool auxLane = (seq_.lane() == JtView::SeqPanel::Lane::Aux);
-            const uint16_t selId = auxLane ? JT::Params::ID::SEQ_AUX_STEP_SELECT
-                                           : JT::Params::ID::SEQ_STEP_SELECT;
-            const uint16_t valId = auxLane ? JT::Params::ID::SEQ_AUX_STEP_VALUE
-                                           : JT::Params::ID::SEQ_STEP_VALUE;
+            // SEQ_AUX_STEP_* — Stage B/C/D; arp: ARP_STEP_SELECT + ACCENT —
+            // Phase 9, the grid edits the arp's per-step accent).
+            const JtView::SeqPanel::Lane ln2 = seq_.lane();
+            uint16_t selId = JT::Params::ID::SEQ_STEP_SELECT;
+            uint16_t valId = JT::Params::ID::SEQ_STEP_VALUE;
+            if (ln2 == JtView::SeqPanel::Lane::Aux) {
+                selId = JT::Params::ID::SEQ_AUX_STEP_SELECT;
+                valId = JT::Params::ID::SEQ_AUX_STEP_VALUE;
+            } else if (ln2 == JtView::SeqPanel::Lane::Arp) {
+                selId = JT::Params::ID::ARP_STEP_SELECT;
+                valId = JT::Params::ID::ARP_STEP_ACCENT;
+            }
 
             // step index 0..15 -> norm on the 1..16 Int lattice: (step)/15.
             // Wire order matters: step_select FIRST (address), then value.
