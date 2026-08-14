@@ -71,6 +71,23 @@ float    normFrom14(uint16_t v14);
 //                    this. Sent by the ESP32 at boot.
 static constexpr uint16_t kResyncRequest = 0x3F00;
 
+// ── Layer addressing (Performance mode) ──────────────────────────────────────
+// Bit 13 of an NRPN number means "layer B". ParamIDs are (section << 7) | index
+// with sections 0..17, so bits 13..11 are free by construction and an older
+// controller that never sets the bit addresses layer A — the right default —
+// with no special case at either end.
+//
+// The receive CHANNEL is NOT used for this. In the ordinary Layer setup both
+// layers are assigned the same channel so one keyboard plays both, at which
+// point a channel-addressed edit could no longer name a layer at all.
+//
+// Note the asymmetry with the resync command: kResyncRequest is 126 << 7, which
+// already HAS bit 13 set. It must therefore be matched on the raw address
+// BEFORE the layer bit is stripped, or every resync turns into a layer-B write
+// to some other parameter.
+static constexpr uint16_t kLayerBit = 0x2000;
+static constexpr uint16_t kIdMask   = 0x1FFF;
+
 // ── Emitter ──────────────────────────────────────────────────────────────────
 // Sink is a raw CC writer — whatever the caller's MIDI layer provides.
 // Kept as a function pointer rather than a std::function: no heap, no vtable.
@@ -84,13 +101,20 @@ public:
     }
 
     // Send one parameter as NRPN. `t` is normalised 0..1.
-    void sendParam(uint16_t paramId, float t);
+    // `layer` 0 = A, 1 = B — encoded in the address, see kLayerBit.
+    void sendParam(uint16_t paramId, float t, uint8_t layer = 0);
 
     // Send a reserved command (no data payload beyond the value).
     void sendCommand(uint16_t address, uint16_t value14 = 0);
 
-    // Ask the Teensy for a full state dump.
-    void requestResync() { sendCommand(kResyncRequest, 0); }
+    // Ask the Teensy for a full state dump OF ONE LAYER. The layer rides in the
+    // command's data payload, which the address itself has no room for and
+    // which was previously ignored — so this costs nothing extra on the wire.
+    //
+    // Must be re-sent whenever the panel switches which layer it edits: this
+    // controller holds ONE value per parameter (it shows one layer at a time),
+    // so the displayed values are stale the instant the target changes.
+    void requestResync(uint8_t layer = 0) { sendCommand(kResyncRequest, layer); }
 
 private:
     CcSink  sink_    = nullptr;
@@ -104,7 +128,7 @@ private:
 // 6/38 repeatedly — the address must persist).
 class Receiver {
 public:
-    using ParamCallback = void (*)(uint16_t paramId, float t, void* ctx);
+    using ParamCallback = void (*)(uint16_t paramId, float t, uint8_t layer, void* ctx);
 
     void begin(ParamCallback cb, void* ctx = nullptr) { cb_ = cb; ctx_ = ctx; }
 

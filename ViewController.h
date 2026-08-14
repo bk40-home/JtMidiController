@@ -56,7 +56,17 @@ public:
     void handleTouch(const TouchInput& touch);
 
     bool handleInboundCC(uint8_t cc, uint8_t value);
-    void requestResync() { nrpn_.requestResync(); }
+    void requestResync() { nrpn_.requestResync(editLayer_); }
+
+    // Which layer the panel is currently editing and displaying (0 = A, 1 = B).
+    // This is the front-panel's own state, NOT engine state: the firmware never
+    // has an "edit target", every message names its layer explicitly.
+    uint8_t editLayer() const { return editLayer_; }
+
+    // Switch the panel to the other layer. A resync is MANDATORY, not a
+    // courtesy: only one value per parameter is held here, so every knob on
+    // screen is showing the outgoing layer's patch until the dump lands.
+    void setEditLayer(uint8_t layer);
 
     uint16_t takeSelectPopupRequest();
 
@@ -158,6 +168,8 @@ private:
     JtParam::Store    store_;
     JtParam::Emitter  nrpn_;
     JtParam::Receiver rx_;
+
+    uint8_t           editLayer_ = 0;
     PickupMode        pickup_;
 
     JtView::NavBar      nav_;

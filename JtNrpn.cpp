@@ -40,11 +40,17 @@ float normFrom14(uint16_t v14) {
 // Emitter
 // ─────────────────────────────────────────────────────────────────────────────
 
-void Emitter::sendParam(uint16_t paramId, float t) {
+void Emitter::sendParam(uint16_t paramId, float t, uint8_t layer) {
     if (!sink_) return;
 
-    const uint8_t  msb = JT::Params::nrpnMsb(paramId);
-    const uint8_t  lsb = JT::Params::nrpnLsb(paramId);
+    // Layer B is the same address with bit 13 set (see kLayerBit). The firmware
+    // folds a layer-B write to a SHARED parameter (fx.*, seq.*) back onto its
+    // single slot, so this end never has to know which parameters bank.
+    const uint16_t addr = static_cast<uint16_t>(
+        (paramId & kIdMask) | (layer ? kLayerBit : 0u));
+
+    const uint8_t  msb = JT::Params::nrpnMsb(addr);
+    const uint8_t  lsb = JT::Params::nrpnLsb(addr);
     const uint16_t v   = normTo14(t);
 
     // Address.
@@ -105,12 +111,18 @@ bool Receiver::handleCC(uint8_t cc, uint8_t value) {
             // Complete only if we have a full address AND a held MSB.
             if (msb_ == 0xFF || lsb_ == 0xFF || dataMsb_ == 0xFF) return true;
 
-            const uint16_t id = JT::Params::idFromNrpn(msb_, lsb_);
-            const uint16_t v  = static_cast<uint16_t>(
-                                    (static_cast<uint16_t>(dataMsb_) << 7) |
-                                    (value & 0x7F));
+            const uint16_t raw = JT::Params::idFromNrpn(msb_, lsb_);
+            const uint16_t v   = static_cast<uint16_t>(
+                                     (static_cast<uint16_t>(dataMsb_) << 7) |
+                                     (value & 0x7F));
 
-            if (cb_) cb_(id, normFrom14(v), ctx_);
+            // Strip the layer out of the address before it is treated as a
+            // ParamID — an unmasked id matches nothing in the table and the
+            // whole of layer B would look like unknown traffic.
+            const uint8_t  layer = (raw & kLayerBit) ? 1u : 0u;
+            const uint16_t id    = static_cast<uint16_t>(raw & kIdMask);
+
+            if (cb_) cb_(id, normFrom14(v), layer, ctx_);
 
             // Address stays latched (sticky) for the next value on this param.
             // Only the data MSB is consumed.

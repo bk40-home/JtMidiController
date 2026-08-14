@@ -9,18 +9,30 @@ using JT::Params::ParamDesc;
 using JT::Params::Type;
 
 namespace {
-void nrpnTrampoline(uint16_t paramId, float t, void* ctx) {
+void nrpnTrampoline(uint16_t paramId, float t, uint8_t layer, void* ctx) {
+    auto* vc = static_cast<ViewController*>(ctx);
+
     // 0x3FFF is the engine's STATUS word (voice mask / playhead / running),
     // not a parameter — reserved by ParamBroadcast on the firmware side.
     // The receiver hands us norm; the exact 14-bit payload is recovered by
     // rounding (float carries 14 bits losslessly), keeping the shared wire
     // class untouched.
     if (paramId == JtView::kStatusAddr) {
-        static_cast<ViewController*>(ctx)->applyStatus(
-            static_cast<uint16_t>(lroundf(t * 16383.0f)));
+        vc->applyStatus(static_cast<uint16_t>(lroundf(t * 16383.0f)));
         return;
     }
-    static_cast<ViewController*>(ctx)->store().setQuietById(paramId, t);
+
+    // This controller holds ONE value per parameter: the panel shows one layer
+    // at a time. A broadcast for the layer we are NOT editing is therefore not
+    // ours to store — writing it would silently repaint every knob with the
+    // other layer's patch. Dropped, not merged.
+    //
+    // Unbanked parameters (fx.*, seq.*, perf.*, reverb, master) always arrive
+    // tagged layer A because there is only one of them, so they are accepted
+    // whichever layer the panel is editing — which is correct: they ARE shared.
+    if (layer != vc->editLayer()) return;
+
+    vc->store().setQuietById(paramId, t);
 }
 } // anonymous namespace
 
@@ -424,11 +436,32 @@ void ViewController::syncSeqLaneRows(JtView::SeqPanel::Lane /*lane*/) {
     invalidateContent();       // flush — the row set and grid both changed
 }
 
+void ViewController::setEditLayer(uint8_t layer) {
+    const uint8_t want = (layer != 0u) ? 1u : 0u;
+    if (want == editLayer_) return;
+
+    // Flush first. Any pending edit was made against the OLD layer and must be
+    // sent with the old layer's address, or it lands on the wrong patch.
+    flushDirty();
+
+    editLayer_ = want;
+
+    // Only one value per parameter is held here, so everything on screen now
+    // belongs to the layer we just left. Ask for the new layer's values; the
+    // trampoline will drop the tail of any in-flight dump for the old one,
+    // because it no longer matches editLayer_.
+    nrpn_.requestResync(editLayer_);
+
+    invalidateContent();
+}
+
 void ViewController::flushDirty() {
     uint16_t o;
     while ((o = store_.takeDirty()) != JtParam::kNoOrdinal) {
         const ParamDesc* d = JtParam::descAt(o);
-        if (d) nrpn_.sendParam(d->id, store_.get(o));
+        // Edits carry the layer explicitly in the address, so an edit is
+        // unambiguous even when both layers share a receive channel.
+        if (d) nrpn_.sendParam(d->id, store_.get(o), editLayer_);
     }
 }
 
