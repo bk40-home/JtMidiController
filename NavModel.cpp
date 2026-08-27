@@ -79,11 +79,13 @@ bool isVisible(const ParamDesc& d, const JtParam::Store& store) {
 // Rows
 // ─────────────────────────────────────────────────────────────────────────────
 
-void collectRows(uint8_t section, const JtParam::Store& store, RowSet& out) {
+void collectRows(uint8_t section, const JtParam::Store& store, RowSet& out,
+                 RowSkipFn skip) {
     out.count = 0;
     for (size_t i = 0; i < kParamCount && out.count < kMaxRows; ++i) {
         const ParamDesc& d = kParams[i];
         if (d.section != section) continue;
+        if (skip && skip(d.id)) continue;      // before the cap — see the header
         if (!isVisible(d, store)) continue;
         out.ordinal[out.count++] = static_cast<uint16_t>(i);
     }

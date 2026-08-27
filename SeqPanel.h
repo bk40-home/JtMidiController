@@ -6,15 +6,18 @@
 // a SHAPE across 16 steps, and you read it by looking at the bars, not by
 // reading sixteen percentages.
 //
-// THE 16 STEPS ARE NOT IN THE PARAMETER STORE
-//   The engine exposes ONE seq.step_value, addressed by seq.step_select — write
-//   the select, then the value. So the store holds only "the last step written",
-//   never all 16. This panel therefore keeps its own 16-entry cache, which is
-//   the UI's view of the pattern.
+// THE 16 STEPS ARE NOW REAL PARAMETERS
+//   This panel used to keep its own 16-entry cache, because the engine exposed
+//   ONE seq.step_value addressed by a moving seq.step_select cursor — so the
+//   store held "the last step written", never all 16. That cache was a display
+//   fiction: it was invisible to the engine, absent from saved patches, and
+//   unreachable by any other editor.
 //
-//   That cache is authoritative for DISPLAY only. The engine is authoritative
-//   for sound. They are kept in step by writing both on every edit, and by
-//   re-reading on a patch load.
+//   The firmware now carries explicit per-step parameters (seq.step_1..16,
+//   seq.aux_step_1..16, arp.step_accent_1..16), so the pattern IS ordinary
+//   store state. The caches are gone. The caller hands draw() the 16 ordinals
+//   for the active lane and this panel reads them straight from the store —
+//   one source of truth, so the bars cannot drift from the sound.
 // =============================================================================
 #pragma once
 
@@ -56,24 +59,17 @@ public:
         return lane_;
     }
 
-    // The UI's view of the 16 step values (normalised).  These act on the
-    // ACTIVE lane (see setLane).  See the header note on why these cannot
-    // simply be read from the store.
-    void  setStep(uint8_t step, float v);
-    float step(uint8_t step) const;
-
-    // Overwrite all 16 on the ACTIVE lane — used for the visible lane.
-    void setAllSteps(const float* v16);
-
-    // Lane-explicit variants — the patch-load path refreshes BOTH lanes'
-    // caches regardless of which is currently shown.
-    void  setStepFor(Lane l, uint8_t step, float v);
-    void  setAllStepsFor(Lane l, const float* v16);
-    float stepFor(Lane l, uint8_t step) const;
-
-    // Draw the bar grid. `playHead` is the currently sounding step, or 0xFF when
-    // the sequencer is stopped.
-    void draw(const JtParam::Store& store, uint8_t playHead, uint8_t focusStep);
+    // Draw the bar grid.
+    //   ord16       — the 16 store ordinals for the ACTIVE lane, in step order.
+    //                 The panel no longer decides which lane's params these
+    //                 are; the caller does, which is why lane switching needs
+    //                 no cache swap any more.
+    //   activeCount — how many of the 16 are played (seq.steps or
+    //                 arp.step_count, depending on the lane — again the
+    //                 caller's call, not this panel's).
+    //   playHead    — the currently sounding step, or 0xFF when stopped.
+    void draw(const JtParam::Store& store, const uint16_t* ord16,
+              uint8_t activeCount, uint8_t playHead, uint8_t focusStep);
 
     // Which step is under this touch point, or 0xFF.
     static uint8_t stepAt(int16_t x, int16_t y);
@@ -96,19 +92,10 @@ private:
     Arduino_GFX* gfx_ = nullptr;
     bool    dirty_ = true;
     Lane    lane_  = Lane::Gate;
-    float   steps_[kSteps]    = {};   // gate lane cache
-    float   auxSteps_[kSteps] = {};   // aux lane cache (Stage B/C/D)
-    float   arpSteps_[kSteps] = {};   // arp accent-lane cache (Phase 9)
 
-    // Active-lane cache accessor — keeps the draw/edit code lane-agnostic.
-    float*       active()       { return lane_ == Lane::Aux ? auxSteps_
-                                       : lane_ == Lane::Arp ? arpSteps_ : steps_; }
-    const float* active() const { return lane_ == Lane::Aux ? auxSteps_
-                                       : lane_ == Lane::Arp ? arpSteps_ : steps_; }
-
-    // 3-way cache selector for the lane-explicit setters (patch-load path).
-    float*       cacheFor(Lane l);
-
+    // lastDrawn_ is a REDRAW filter, not a cache of the pattern: it records
+    // what is currently on the glass so an unchanged bar is not repainted.
+    // The pattern itself lives in the parameter store.
     float   lastDrawn_[kSteps] = {};
     uint8_t lastHead_  = 0xFF;
     uint8_t lastFocus_ = 0xFF;

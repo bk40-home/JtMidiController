@@ -34,6 +34,14 @@ namespace JtView {
 // ParamBroadcast::kStatusAddr on the firmware side. Never a ParamID.
 constexpr uint16_t kStatusAddr = 0x3FFF;
 
+// Second reserved address: the ARPEGGIATOR playhead.  The word above already
+// spends 13 of its 14 bits (mask:8 | seqStep:4 | seqRunning:1), so the arp
+// could not be packed alongside it.  Layout:
+//     [13..5] reserved 0   [4..1] arpStep:4   [0] arpRunning:1
+// Without this the arp lane drew the SEQUENCER's playhead, or none at all
+// whenever the sequencer happened to be stopped.
+constexpr uint16_t kArpStatusAddr = 0x3FFE;
+
 class HomePanel {
 
 public:

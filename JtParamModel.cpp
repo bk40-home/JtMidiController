@@ -29,12 +29,35 @@ inline bool unitIs(const char* u, const char* what) {
     return u && strcmp(u, what) == 0;
 }
 
-// Continuous params step by 1/128 of the normalised range, so a full sweep is
-// ~128 detents. That deliberately matches the OLD 7-bit CC feel: the encoders
-// were tuned against 0..127, and changing the detent size would change the
-// muscle memory of every existing control. The VALUE is now a float — only the
-// step granularity is inherited.
-constexpr float kContStep = 1.0f / 128.0f;
+// Continuous params used to step by 1/128 of the normalised range, inherited
+// from the old 7-bit CC feel. That resolution is the reason a slow filter
+// sweep sounds like a staircase: filter.cutoff spans 8.2 OCTAVES over its
+// exponential range, so 1/128 of it is ~77 CENTS PER DETENT — two thirds of a
+// semitone, and worse with resonance up because the resonant peak jumps by
+// that much each click. The wire was never the limit: a 14-bit NRPN LSB on the
+// same row is 0.62 cents, so the panel was throwing away 128x the resolution
+// it already had available.
+//
+// The base step is now 1/1024 (~9.6 cents on that row), which the firmware's
+// cutoff smoother then spreads across ~3 audio blocks — inaudible.
+//
+// ACCELERATION is what keeps that usable. At 1/1024 a full sweep would be 1024
+// detents if every click were equal, which is unusable by hand. Instead the
+// step scales with how many detents arrived in a SINGLE poll: turn slowly and
+// you get one fine click; spin fast and encoder.delta() returns a larger
+// count, which is squared into a much bigger jump. No timers and no per-encoder
+// state — the magnitude of the delta already carries the speed information.
+//
+// Worked example at kContAccelCap = 16: a slow click moves 1/1024 of range;
+// a delta of 4 in one poll moves 16/1024; a fast spin at the cap moves
+// 16/1024 per detent, so a full sweep is ~64 detents — FASTER than the old
+// 1/128 behaviour, while still resolving 9.6 cents when you creep it.
+//
+// TUNE BY FEEL: these two numbers are the whole control law. If fast sweeps
+// feel sluggish raise the cap; if fine adjustment overshoots, raise the
+// divisor. Both are pure panel feel and touch no audio path.
+constexpr float   kContStep     = 1.0f / 1024.0f;
+constexpr int32_t kContAccelCap = 16;
 
 const char* const kNoteNames[12] = {
     "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"
@@ -199,7 +222,17 @@ float step(const ParamDesc& d, float t, int32_t steps) {
 
         case Type::Continuous:
         default:
-            return clamp01(t + static_cast<float>(steps) * kContStep);
+        {
+            // Magnitude-based acceleration. |steps| is how many detents landed
+            // in one poll, which IS the turn speed — no timing state needed.
+            // Gain rises linearly with it (so the total move is quadratic),
+            // capped so a jittery read cannot fling the value across the range.
+            int32_t mag = steps < 0 ? -steps : steps;
+            if (mag < 1) mag = 1;
+            int32_t gain = mag;
+            if (gain > kContAccelCap) gain = kContAccelCap;
+            return clamp01(t + static_cast<float>(steps * gain) * kContStep);
+        }
     }
 }
 

@@ -9,6 +9,33 @@ using JT::Params::ParamDesc;
 using JT::Params::Type;
 
 namespace {
+
+// Rows the SEQ page must never list.
+//
+//   GRID ARRAYS — seq.step_1..16, seq.aux_step_1..16, arp.step_on_1..16,
+//   arp.step_accent_1..16, arp.step_ratchet_1..16. 80 parameters that the bar
+//   grid edits. They outnumber RowSet's capacity several times over, so they
+//   are dropped BEFORE the cap (see NavModel.h).
+//
+//   RETIRED CURSORS — the old select-then-value pairs. The firmware still
+//   carries the rows (ParamIDs are permanent) but the engine ignores them, so
+//   a row here would send a message nothing acts on. Worse than absent.
+bool seqRowSkip(uint16_t id) {
+    using namespace JT::Params;
+    const bool gridArray =
+           (id >= ID::SEQ_STEP_1     && id <= ID::SEQ_AUX_STEP_16)
+        || (id >= ID::ARP_STEP_ON_1  && id <= ID::ARP_STEP_RATCHET_16);
+    const bool retiredCursor =
+           id == ID::SEQ_STEP_SELECT     || id == ID::SEQ_STEP_VALUE
+        || id == ID::SEQ_AUX_STEP_SELECT || id == ID::SEQ_AUX_STEP_VALUE
+        || id == ID::ARP_STEP_SELECT     || id == ID::ARP_STEP_ONOFF
+        || id == ID::ARP_STEP_ACCENT     || id == ID::ARP_STEP_RATCHET;
+    return gridArray || retiredCursor;
+}
+
+} // anonymous namespace
+
+namespace {
 void nrpnTrampoline(uint16_t paramId, float t, uint8_t layer, void* ctx) {
     auto* vc = static_cast<ViewController*>(ctx);
 
@@ -19,6 +46,13 @@ void nrpnTrampoline(uint16_t paramId, float t, uint8_t layer, void* ctx) {
     // class untouched.
     if (paramId == JtView::kStatusAddr) {
         vc->applyStatus(static_cast<uint16_t>(lroundf(t * 16383.0f)));
+        return;
+    }
+
+    // 0x3FFE is the ARP playhead, on its own reserved address because the
+    // word above is already 13 of its 14 bits. Same decode.
+    if (paramId == JtView::kArpStatusAddr) {
+        vc->applyArpStatus(static_cast<uint16_t>(lroundf(t * 16383.0f)));
         return;
     }
 
@@ -58,14 +92,18 @@ void ViewController::begin(JtParam::CcSink sink, Arduino_GFX* gfx) {
 
     // Resolved ONCE: ordinalOf is a linear table walk, and the SEQ edit-row
     // sync below runs every loop frame.
-    ordSeqSel_ = JtParam::ordinalOf(JT::Params::ID::SEQ_STEP_SELECT);
-    ordSeqVal_ = JtParam::ordinalOf(JT::Params::ID::SEQ_STEP_VALUE);
-    ordSeqAuxSel_ = JtParam::ordinalOf(JT::Params::ID::SEQ_AUX_STEP_SELECT);
-    ordSeqAuxVal_ = JtParam::ordinalOf(JT::Params::ID::SEQ_AUX_STEP_VALUE);
-    // Phase 9: the arp lane drives the ACCENT lane on the shared grid — SELECT
-    // then ACCENT, exactly like the seq gate/aux SEL/VAL pairs.
-    ordArpSel_ = JtParam::ordinalOf(JT::Params::ID::ARP_STEP_SELECT);
-    ordArpAcc_ = JtParam::ordinalOf(JT::Params::ID::ARP_STEP_ACCENT);
+    // Every step is its own parameter now, so this resolves five contiguous
+    // blocks of sixteen rather than four cursor pairs. The IDs are contiguous
+    // by construction (the generator enforces position-derived indices within
+    // a section), so base + i is exact — but ordinalOf is still used per step
+    // so a table change can never silently shift the grid onto wrong slots.
+    for (uint8_t i = 0; i < kGridSteps; ++i) {
+        ordSeqStep_   [i] = JtParam::ordinalOf(static_cast<uint16_t>(JT::Params::ID::SEQ_STEP_1 + i));
+        ordSeqAuxStep_[i] = JtParam::ordinalOf(static_cast<uint16_t>(JT::Params::ID::SEQ_AUX_STEP_1 + i));
+        ordArpAccent_ [i] = JtParam::ordinalOf(static_cast<uint16_t>(JT::Params::ID::ARP_STEP_ACCENT_1 + i));
+        ordArpOn_     [i] = JtParam::ordinalOf(static_cast<uint16_t>(JT::Params::ID::ARP_STEP_ON_1 + i));
+        ordArpRatchet_[i] = JtParam::ordinalOf(static_cast<uint16_t>(JT::Params::ID::ARP_STEP_RATCHET_1 + i));
+    }
     ordMasterVol_ = JtParam::ordinalOf(JT::Params::ID::MASTER_VOLUME);
 
     home_.begin(gfx);
@@ -164,7 +202,8 @@ bool ViewController::refreshRows() {
     if (sec == 0xFF) {
         fresh.count = 0;            // ENV overlay: no rows, just three curves
     } else {
-        JtNav::collectRows(sec, store_, fresh);
+        JtNav::collectRows(sec, store_, fresh,
+                           (k == JtNav::PageKind::Sequencer) ? &seqRowSkip : nullptr);
     }
 
     // Sequencer lane filter (Stage B/C/D): the SEQ page hosts two lanes on one
@@ -174,41 +213,43 @@ bool ViewController::refreshRows() {
     // grid.  Drop the inactive lane's four exclusive params here.
     if (k == JtNav::PageKind::Sequencer) {
         const JtView::SeqPanel::Lane ln = seq_.lane();
-        // Phase 9: on the Arp flip state the section is 17, so `fresh` already
-        // holds only arp rows.  The grid drives ARP_STEP_SELECT + ACCENT, so
-        // hide those two from the list; ARP_STEP_ONOFF and ARP_STEP_RATCHET
-        // stay as list rows (this pass's low-risk substitute for a tri-lane
-        // grid).  For the gate/aux lanes the original StageB/C/D filter runs.
-        if (ln == JtView::SeqPanel::Lane::Arp) {
-            JtNav::RowSet filt{};
-            for (uint8_t i = 0; i < fresh.count; ++i) {
-                const ParamDesc* dp = JtParam::descAt(fresh.ordinal[i]);
-                if (dp && (dp->id == JT::Params::ID::ARP_STEP_SELECT
-                        || dp->id == JT::Params::ID::ARP_STEP_ACCENT))
-                    continue;   // grid's job, not a list row
-                filt.ordinal[filt.count++] = fresh.ordinal[i];
-            }
-            fresh = filt;
-        } else {
-        const bool aux = (seq_.lane() == JtView::SeqPanel::Lane::Aux);
+
+        // The grid arrays and retired cursor rows are already gone (seqRowSkip,
+        // applied inside collectRows). What is left to do here is per-LANE:
+        // the SEQ page hosts two lanes on one set of rows, and each lane's
+        // dest/depth/bipolar must show only while that lane is active, or both
+        // pile up and the aux rows bleed over the grid.
         JtNav::RowSet filt{};
         for (uint8_t i = 0; i < fresh.count; ++i) {
             const ParamDesc* dp = JtParam::descAt(fresh.ordinal[i]);
             if (!dp) { filt.ordinal[filt.count++] = fresh.ordinal[i]; continue; }
             const uint16_t id = dp->id;
-            const bool gateOnly = (id == JT::Params::ID::SEQ_DESTINATION
-                                || id == JT::Params::ID::SEQ_DEPTH
-                                || id == JT::Params::ID::SEQ_STEP_SELECT
-                                || id == JT::Params::ID::SEQ_STEP_VALUE);
-            const bool auxOnly  = (id == JT::Params::ID::SEQ_AUX_DESTINATION
-                                || id == JT::Params::ID::SEQ_AUX_DEPTH
-                                || id == JT::Params::ID::SEQ_AUX_STEP_SELECT
-                                || id == JT::Params::ID::SEQ_AUX_STEP_VALUE);
-            if (aux ? gateOnly : auxOnly) continue;   // hide the inactive lane's
+
+            if (ln != JtView::SeqPanel::Lane::Arp) {
+                const bool aux = (ln == JtView::SeqPanel::Lane::Aux);
+                const bool gateOnly = (id == JT::Params::ID::SEQ_DESTINATION
+                                    || id == JT::Params::ID::SEQ_DEPTH
+                                    || id == JT::Params::ID::SEQ_STEP_BIPOLAR);
+                const bool auxOnly  = (id == JT::Params::ID::SEQ_AUX_DESTINATION
+                                    || id == JT::Params::ID::SEQ_AUX_DEPTH
+                                    || id == JT::Params::ID::SEQ_AUX_BIPOLAR);
+                if (aux ? gateOnly : auxOnly) continue;
+            }
+
             filt.ordinal[filt.count++] = fresh.ordinal[i];
         }
+
+        // On the arp lane, put back the FOCUSED step's on/off and ratchet as
+        // two ordinary rows. Sixteen of each would be unusable; one of each,
+        // labelled with its step number, is exactly what the grid cannot show.
+        if (ln == JtView::SeqPanel::Lane::Arp
+            && seqSelStep_ < kGridSteps
+            && static_cast<uint8_t>(filt.count + 2) <= JtNav::kMaxRows) {
+            filt.ordinal[filt.count++] = ordArpOn_     [seqSelStep_];
+            filt.ordinal[filt.count++] = ordArpRatchet_[seqSelStep_];
+        }
+
         fresh = filt;
-        }   // end gate/aux lane filter (Phase 9 arp lane handled above)
     }
 
     // Compare by CONTENT. Same set -> nothing to invalidate; keep the pots
@@ -386,44 +427,51 @@ void ViewController::update(Angle8Unit& angle, Encoder8Unit& encoder,
     flushDirty();
 }
 
+// Which 16 ordinals the grid is showing. One place, so the draw path, the tap
+// path and the row filter can never disagree about what the grid is editing.
+const uint16_t* ViewController::laneOrdinals() const {
+    switch (seq_.lane()) {
+        case JtView::SeqPanel::Lane::Aux: return ordSeqAuxStep_;
+        case JtView::SeqPanel::Lane::Arp: return ordArpAccent_;
+        case JtView::SeqPanel::Lane::Gate:
+        default:                          return ordSeqStep_;
+    }
+}
+
+// How many of the 16 are played. The gate and aux lanes share seq.steps (they
+// run on ONE clock); the arp lane has its own arp.step_count.
+uint8_t ViewController::laneActiveCount() const {
+    const uint16_t id = (seq_.lane() == JtView::SeqPanel::Lane::Arp)
+                      ? JT::Params::ID::ARP_STEP_COUNT
+                      : JT::Params::ID::SEQ_STEPS;
+    const ParamDesc* d = JtParam::descOf(id);
+    if (!d) return JtView::SeqPanel::kSteps;
+    const float eng = JtParam::toEng(*d, store_.getById(id));
+    int n = static_cast<int>(eng + 0.5f);
+    if (n < 1) n = 1;
+    if (n > JtView::SeqPanel::kSteps) n = JtView::SeqPanel::kSteps;
+    return static_cast<uint8_t>(n);
+}
+
 void ViewController::syncSeqEditRows() {
-    if (JtNav::page(page_).kind != JtNav::PageKind::Sequencer) {
-        seqSelStep_ = 0xFF;   // re-sync on the next visit
-        return;
-    }
+    // WAS: a select-then-value mirror that copied the engine's edit cursor into
+    // a VAL row and wrote the row back to a local grid cache. All three of
+    // those things are gone — every step is its own parameter, so the grid
+    // reads the store directly and a tap writes one slot.
+    //
+    // What remains is the ARP lane's list rows: on/off and ratchet are shown
+    // for the FOCUSED step only (sixteen of each would bury the page), so
+    // moving the focus changes the visible row SET and the list must be
+    // rebuilt. Cheap: one compare per frame, and refreshRows only runs when
+    // the focus actually moved.
+    if (JtNav::page(page_).kind != JtNav::PageKind::Sequencer) return;
+    if (seq_.lane() != JtView::SeqPanel::Lane::Arp)            return;
 
-    // Which SEL/VAL param pair the grid drives depends on the active lane —
-    // gate uses SEQ_STEP_*, aux uses SEQ_AUX_STEP_*, arp uses ARP_STEP_SELECT +
-    // ARP_STEP_ACCENT (the grid edits the accent lane; on/off & ratchet are
-    // list rows).  All three are the same select-then-value protocol.
-    const JtView::SeqPanel::Lane ln = seq_.lane();
-    uint16_t ordSel = ordSeqSel_, ordVal = ordSeqVal_;
-    if (ln == JtView::SeqPanel::Lane::Aux) { ordSel = ordSeqAuxSel_; ordVal = ordSeqAuxVal_; }
-    else if (ln == JtView::SeqPanel::Lane::Arp) { ordSel = ordArpSel_; ordVal = ordArpAcc_; }
-
-    const uint8_t sel = static_cast<uint8_t>(
-        lroundf(store_.get(ordSel) * 15.0f));
-
-    if (sel != seqSelStep_) {
-        // Selecting a step is a READ, not a write: load its value into the
-        // VAL row quietly (no dirty mark, no NRPN — the engine already moved
-        // its edit cursor when the SEL write itself was flushed). Stamping
-        // the PREVIOUS step's value onto the new one here would corrupt the
-        // pattern just by browsing it.
-        store_.setQuiet(ordVal, seq_.step(sel));   // seq_.step() reads active lane
-        // setQuiet marks nothing dirty, so the normal per-write retarget
-        // never runs — refresh the pot targets here or the pot bound to the
-        // VAL row would still be seeking the PREVIOUS step's value.
+    if (seqSelStep_ != lastArpRowStep_) {
+        lastArpRowStep_ = seqSelStep_;
+        if (refreshRows()) invalidateContent();
         retargetPickup();
-        seqSelStep_ = sel;
-        return;
     }
-
-    // Same step, VAL moved (pot, drag, encoder push/rotate, or an inbound
-    // NRPN edit): write it through to the grid so the bar follows the
-    // fine-tune live. The engine hears it via the normal dirty flush.
-    const float v = store_.get(ordVal);
-    if (!(v == seq_.step(sel))) seq_.setStep(sel, v);
 }
 
 // Called when the seq page button toggles the edit lane: force the mirror to
@@ -513,16 +561,25 @@ void ViewController::render() {
             }
             break;
 
-        case JtNav::PageKind::Sequencer:
-            // The highlighted bar is the SELECTED STEP (SEL row / last tap),
-            // not the focused list row. The playhead is the ENGINE's, from
-            // the status feed — 0xFF (no head) while stopped, so a stopped
-            // sequencer never shows a stuck outline.
-            if (gfxReady) seq_.draw(store_,
-                                    seqRunning_ ? playStep_ : 0xFF,
+        case JtNav::PageKind::Sequencer: {
+            // The highlighted bar is the FOCUSED STEP (last tap). The playhead
+            // is the ENGINE's, from the status feed — 0xFF (no head) while
+            // stopped, so a stopped lane never shows a stuck outline.
+            //
+            // Each lane watches its OWN transport: the arp lane follows the arp
+            // playhead on 0x3FFE, the gate/aux lanes the sequencer's on 0x3FFF.
+            // Previously the arp lane drew the SEQUENCER's head, which was
+            // simply the wrong marker, and showed nothing at all whenever the
+            // sequencer happened to be stopped.
+            const bool arpLane = (seq_.lane() == JtView::SeqPanel::Lane::Arp);
+            const bool running = arpLane ? arpRunning_  : seqRunning_;
+            const uint8_t head = arpLane ? arpPlayStep_ : playStep_;
+            if (gfxReady) seq_.draw(store_, laneOrdinals(), laneActiveCount(),
+                                    running ? head : 0xFF,
                                     seqSelStep_);
             list_.drawDirty(rows_, store_, rowHw_, focusRow_, maxY, budget);
             break;
+        }
 
         case JtNav::PageKind::Home: {
             // HOME owns the whole content area — wait for the erase to
@@ -899,40 +956,26 @@ void ViewController::handleTouch(const TouchInput& touch) {
                       != 0xFF) {
             // ── Tap-grid step entry (standing spec: TAP, not drag) ──────────
             // The tapped bar is the step, the tapped HEIGHT is its value.
-            // Wire order matters and is fixed by the engine's addressing:
-            // step_select FIRST (the address), then step_value (the data).
+            //
+            // ONE WRITE. The select-then-value wire dance is gone: every step
+            // owns a parameter, so the tap addresses its slot directly. That
+            // also retires the forced-write hack this used to need — painting
+            // the same value onto a different step used to collide on the one
+            // shared slot and get skipped as "unchanged", leaving the bar
+            // showing a value the engine had never heard.
             const uint8_t step = JtView::SeqPanel::stepAt(touchStartX_,
                                                           touchStartY_);
             const float   v    = JtView::SeqPanel::valueFromY(touchStartY_);
 
-            // Active lane picks the target param pair (gate: SEQ_STEP_*, aux:
-            // SEQ_AUX_STEP_* — Stage B/C/D; arp: ARP_STEP_SELECT + ACCENT —
-            // Phase 9, the grid edits the arp's per-step accent).
-            const JtView::SeqPanel::Lane ln2 = seq_.lane();
-            uint16_t selId = JT::Params::ID::SEQ_STEP_SELECT;
-            uint16_t valId = JT::Params::ID::SEQ_STEP_VALUE;
-            if (ln2 == JtView::SeqPanel::Lane::Aux) {
-                selId = JT::Params::ID::SEQ_AUX_STEP_SELECT;
-                valId = JT::Params::ID::SEQ_AUX_STEP_VALUE;
-            } else if (ln2 == JtView::SeqPanel::Lane::Arp) {
-                selId = JT::Params::ID::ARP_STEP_SELECT;
-                valId = JT::Params::ID::ARP_STEP_ACCENT;
+            if (step < kGridSteps) {
+                store_.set(laneOrdinals()[step], v);
+
+                // Focus follows the tap. On the arp lane this also swaps which
+                // step's on/off + ratchet rows the list shows, which
+                // syncSeqEditRows() picks up on the next frame.
+                seqSelStep_ = step;
+                seq_.invalidate();
             }
-
-            // step index 0..15 -> norm on the 1..16 Int lattice: (step)/15.
-            // Wire order matters: step_select FIRST (address), then value.
-            store_.setById(selId, static_cast<float>(step) / 15.0f);
-
-            // FORCED write (D-5): painting the same value onto a DIFFERENT
-            // step re-writes step_value with an equal float; the plain set()
-            // would skip the dirty mark and the engine would never hear it,
-            // while the grid happily showed the bar.
-            store_.setForce(JtParam::ordinalOf(valId), v);
-
-            // The panel's 16-entry cache is the UI's view of the pattern (the
-            // store only ever holds the LAST step written).  setStep() writes
-            // the ACTIVE lane's cache.
-            seq_.setStep(step, v);
 
         } else if (touchRow_ != JtView::RowList::kNoRow && !touchMoved_) {
             // A tap that never moved.

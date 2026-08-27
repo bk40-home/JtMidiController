@@ -29,59 +29,6 @@ constexpr int16_t kBarW  = (480 - 2 * kPadX - 15 * kGap) / SeqPanel::kSteps;
 } // anonymous namespace
 
 // ─────────────────────────────────────────────────────────────────────────────
-// The UI's step cache
-// ─────────────────────────────────────────────────────────────────────────────
-
-void SeqPanel::setStep(uint8_t s, float v) {
-    if (s >= kSteps) return;
-    if (v < 0.0f) v = 0.0f;
-    if (v > 1.0f) v = 1.0f;
-    active()[s] = v;
-}
-
-float SeqPanel::step(uint8_t s) const {
-    return (s < kSteps) ? active()[s] : 0.0f;
-}
-
-void SeqPanel::setAllSteps(const float* v16) {
-    if (!v16) return;
-    for (uint8_t i = 0; i < kSteps; ++i) setStep(i, v16[i]);
-    dirty_ = true;
-}
-
-// Lane-explicit variants (patch load refreshes both caches) ------------------
-// Cache selector — 3-way (Gate/Aux/Arp), used by every lane-explicit method so
-// the arp cache is never accidentally routed to the gate array.
-float* SeqPanel::cacheFor(Lane l) {
-    return l == Lane::Aux ? auxSteps_ : l == Lane::Arp ? arpSteps_ : steps_;
-}
-
-void SeqPanel::setStepFor(Lane l, uint8_t s, float v) {
-    if (s >= kSteps) return;
-    if (v < 0.0f) v = 0.0f;
-    if (v > 1.0f) v = 1.0f;
-    cacheFor(l)[s] = v;
-    if (l == lane_) dirty_ = true;                 // repaint only if visible
-}
-
-void SeqPanel::setAllStepsFor(Lane l, const float* v16) {
-    if (!v16) return;
-    float* dst = cacheFor(l);
-    for (uint8_t i = 0; i < kSteps; ++i) {
-        float v = v16[i];
-        if (v < 0.0f) v = 0.0f;
-        if (v > 1.0f) v = 1.0f;
-        dst[i] = v;
-    }
-    if (l == lane_) dirty_ = true;
-}
-
-float SeqPanel::stepFor(Lane l, uint8_t s) const {
-    if (s >= kSteps) return 0.0f;
-    return (l == Lane::Aux ? auxSteps_ : l == Lane::Arp ? arpSteps_ : steps_)[s];
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // Hit test
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -148,30 +95,28 @@ void SeqPanel::drawBar(uint8_t i, float v, uint8_t activeCount,
     gfx_->drawFastHLine(x, B, kBarW, C_GRID);
 }
 
-void SeqPanel::draw(const JtParam::Store& store, uint8_t playHead,
-                    uint8_t focusStep) {
-    if (!gfx_) return;
+void SeqPanel::draw(const JtParam::Store& store, const uint16_t* ord16,
+                    uint8_t activeCount, uint8_t playHead, uint8_t focusStep) {
+    if (!gfx_ || !ord16) return;
 
-    // seq.steps is continuous 0..1; it means "how many of the 16 are played".
-    const ParamDesc* sd = JtParam::descOf(ID::SEQ_STEPS);
-    uint8_t count = kSteps;
-    if (sd) {
-        const float eng = JtParam::toEng(*sd, store.getById(ID::SEQ_STEPS));
-        count = static_cast<uint8_t>(eng + 0.5f);
-        if (count < 1)      count = 1;
-        if (count > kSteps) count = kSteps;
-    }
+    uint8_t count = activeCount;
+    if (count < 1)      count = 1;
+    if (count > kSteps) count = kSteps;
 
-    const float* cache = active();
     for (uint8_t i = 0; i < kSteps; ++i) {
+        // Read the step STRAIGHT from the store. Anything that moves it —
+        // a tap here, a pot, an inbound NRPN from the plugin, a patch load —
+        // lands in the same slot, so the bars cannot disagree with the sound.
+        const float v = store.get(ord16[i]);
+
         const bool headMoved  = (i == playHead)  != (i == lastHead_);
         const bool focusMoved = (i == focusStep) != (i == lastFocus_);
-        const bool valMoved   = !(cache[i] == lastDrawn_[i]);
+        const bool valMoved   = !(v == lastDrawn_[i]);
         const bool countMoved = (count != lastCount_);
 
         if (dirty_ || valMoved || headMoved || focusMoved || countMoved) {
-            drawBar(i, cache[i], count, i == playHead, i == focusStep);
-            lastDrawn_[i] = cache[i];
+            drawBar(i, v, count, i == playHead, i == focusStep);
+            lastDrawn_[i] = v;
         }
     }
 

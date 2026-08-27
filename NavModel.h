@@ -89,6 +89,15 @@ struct RowSet {
 };
 
 // Collect the visible rows of `section`, in table order.
-void collectRows(uint8_t section, const JtParam::Store& store, RowSet& out);
+//
+// `skip` (optional) drops a parameter by ID BEFORE the kMaxRows cap is
+// applied. That ordering matters: the sequencer and arp sections carry 32 and
+// 48 per-step parameters that the grid edits and the list must never show, and
+// they outnumber kMaxRows on their own. Filtering after the cap would work
+// only because the generator appends — i.e. by luck about table order — and
+// would silently truncate real rows the day anything is inserted.
+using RowSkipFn = bool (*)(uint16_t id);
+void collectRows(uint8_t section, const JtParam::Store& store, RowSet& out,
+                 RowSkipFn skip = nullptr);
 
 } // namespace JtNav

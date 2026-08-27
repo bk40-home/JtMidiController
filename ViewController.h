@@ -77,6 +77,13 @@ public:
         seqRunning_ = (status14 & 1u) != 0;
     }
 
+    // Arp status word from NRPN 0x3FFE: [reserved:9|arpStep:4|arpRunning:1].
+    // A SEPARATE feed because the sequencer word above is full.
+    void applyArpStatus(uint16_t status14) {
+        arpPlayStep_ = static_cast<uint8_t>((status14 >> 1) & 0x0F);
+        arpRunning_  = (status14 & 1u) != 0;
+    }
+
     // The HOME dashboard shows which slot is loaded; PatchManager owns that
     // fact, the .ino ferries it here after PatchManager updates.
     void setPatchSlot(uint8_t slot) { patchSlot_ = slot; }
@@ -245,23 +252,40 @@ private:
     uint8_t  voiceMask_  = 0;
     uint8_t  playStep_   = 0;
     bool     seqRunning_ = false;
+    uint8_t  arpPlayStep_ = 0;          // NRPN 0x3FFE — arp lane playhead
+    bool     arpRunning_  = false;
     uint32_t lastRxMs_   = 0;
     uint8_t  patchSlot_  = 0xFF;
     uint16_t ordMasterVol_ = 0xFFFF;   // resolved once in begin()
     bool     homeVolDrag_  = false;    // finger owns the volume bar
 
-    // ── SEQ edit-cursor sync (SEL row <-> grid <-> VAL row) ─────────────────
-    // SEL selects a step: the grid highlights it and the VAL row LOADS its
-    // value (display only, nothing sent — the engine keeps its own edit
-    // cursor from the SEL write itself). VAL then fine-tunes: any change,
-    // from pot, drag, encoder or inbound NRPN, writes through to the grid.
-    uint8_t  seqSelStep_ = 0xFF;        // 0xFF = not yet synced on this page
-    uint16_t ordSeqSel_  = 0xFFFF;      // ordinals resolved once in begin();
-    uint16_t ordSeqVal_  = 0xFFFF;      // the sync runs every loop frame
-    uint16_t ordSeqAuxSel_ = 0xFFFF;    // aux-lane SEL/VAL ordinals (Stage B/C/D)
-    uint16_t ordSeqAuxVal_ = 0xFFFF;
-    uint16_t ordArpSel_    = 0xFFFF;    // arp accent-lane SEL/ACCENT ordinals (Phase 9)
-    uint16_t ordArpAcc_    = 0xFFFF;
+    // ── SEQ / ARP step grid ─────────────────────────────────────────────────
+    // The select-then-value cursor protocol is GONE. Every step is its own
+    // parameter now, so the grid needs one ordinal per step per lane and no
+    // cursor mirroring at all: a tap is a single write to a single slot.
+    //
+    // Resolved ONCE in begin() — ordinalOf is a linear table walk and the grid
+    // is read every frame.
+    static constexpr uint8_t kGridSteps = 16;
+    uint16_t ordSeqStep_   [kGridSteps];   // seq.step_1..16
+    uint16_t ordSeqAuxStep_[kGridSteps];   // seq.aux_step_1..16
+    uint16_t ordArpAccent_ [kGridSteps];   // arp.step_accent_1..16  (grid lane)
+    uint16_t ordArpOn_     [kGridSteps];   // arp.step_on_1..16      (list row)
+    uint16_t ordArpRatchet_[kGridSteps];   // arp.step_ratchet_1..16 (list row)
+
+    // Which step the grid has focused. Purely local UI state now — there is no
+    // engine-side cursor to keep in step with. Drives the highlight AND, on the
+    // arp lane, which step's on/off + ratchet rows the list shows.
+    uint8_t  seqSelStep_ = 0;
+    // Last focus the ARP list rows were built for. The arp lane shows on/off
+    // and ratchet for the FOCUSED step only, so moving the focus changes the
+    // visible row set and the list has to be rebuilt.
+    uint8_t  lastArpRowStep_ = 0xFF;
+
+    // The 16 ordinals for whichever lane is showing, and the parameter that
+    // says how many of them are played.
+    const uint16_t* laneOrdinals() const;
+    uint8_t         laneActiveCount() const;
 
     void handleButtons(ByteButtonUnit& buttons);
     void handlePots(Angle8Unit& angle);
