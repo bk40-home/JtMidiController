@@ -149,7 +149,14 @@ static uint32_t lastDebugMs   = 0;
 // which threw the precision away.
 static void onSendCC(uint8_t cc, uint8_t value, uint8_t channel) {
     uartMidi.sendCC(cc, value, channel);
+#if JT_ENABLE_USB_MIDI
+    // Mirror to the DAW at full 14-bit NRPN resolution.  Off by default: this
+    // call blocks when no USB host drains the endpoint, splitting the UART
+    // cluster and breaking NRPN on the Teensy (see Config.h JT_ENABLE_USB_MIDI).
     USBMIDI.sendControlChange(cc, value, channel);
+#else
+    (void)channel;
+#endif
 }
 
 // Every inbound CC, from either port, goes to the ViewController, which hands
@@ -171,6 +178,16 @@ void setup() {
     Serial.begin(115200);
     delay(300);
     Serial.println("\n=== JT-8000 Controller (Phase D) ===");
+
+    // Suppress ESP-IDF I2C master NACK log spam.  The M5 unit libraries do
+    // occasional speculative reads that NACK harmlessly — the next transaction
+    // recovers and our data is fine (stable pot/encoder values and live screen
+    // updates prove the bus works).  Core 3.x logs every NACK at ERROR level,
+    // flooding the console; core 2.x didn't, which is why the demo looked
+    // clean.  This hides the NOISE, not real failures: a corrupted read would
+    // still surface as bad data on screen.  To re-enable for diagnosis, set
+    // the level to ESP_LOG_ERROR instead.
+    esp_log_level_set("i2c.master", ESP_LOG_NONE);
 
     PerfMonitor::begin();
 
@@ -194,7 +211,11 @@ void setup() {
     uartMidi.begin();
     uartMidi.setOnReceiveCC(onReceiveCC);
     #endif
-    Serial.println("[USB-MIDI] Adafruit TinyUSB active");
+#if JT_ENABLE_USB_MIDI
+    Serial.println("[USB-MIDI] Adafruit TinyUSB active (DAW mirror ON)");
+#else
+    Serial.println("[USB-MIDI] present but DAW mirror OFF (JT_ENABLE_USB_MIDI=0)");
+#endif
 
     // ── 5. Patch store (FFat) ───────────────────────────────────────────
     patchStore.begin();
@@ -242,16 +263,27 @@ void loop() {
     uartMidi.poll();
     #endif
 
+#if JT_ENABLE_USB_MIDI
     if (USBMIDI.read() && USBMIDI.getType() == midi::ControlChange) {
         const uint8_t cc  = USBMIDI.getData1();
         const uint8_t val = USBMIDI.getData2();
         const uint8_t ch  = USBMIDI.getChannel();
 
-        // Update our own view of it, AND pass it through to the Teensy (which
-        // parses NRPN natively on this port). Both ends stay in step.
-        view.handleInboundCC(cc, val);
-        uartMidi.sendCC(cc, val, ch);
+        // Channel Mode messages (CC 120-127: all-sound-off, reset-controllers,
+        // all-notes-off, omni/mono/poly) are NOT ours to relay.  A DAW streams
+        // CC 123 (all-notes-off) continuously — on every transport tick, loop,
+        // and focus change — and blindly forwarding it onto Serial1 made the
+        // Teensy panic its voices ~2x/sec, cutting every held note short the
+        // instant this controller was connected.  They also mean nothing to
+        // our own NRPN-keyed view.  Drop them here; only 0-119 pass through.
+        if (cc < 120) {
+            // Update our own view of it, AND pass it through to the Teensy
+            // (which parses NRPN natively on this port). Both ends stay in step.
+            view.handleInboundCC(cc, val);
+            uartMidi.sendCC(cc, val, ch);
+        }
     }
+#endif
 
     // ── 3. Modal overlays take the input, or the view does ───────────────
     if (nameEditor.isActive()) {

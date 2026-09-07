@@ -63,6 +63,19 @@ public:
     // straight over the curve and it looked like the graphic was missing.
     static constexpr int16_t kPadX   = 14;
 
+    // Fault 4: envelope vertices are drawn as filled circles of this radius at
+    // the peak (band top) and sustain (which reaches the band bottom when
+    // sustain = 0). A circle centred exactly on the top/bottom edge spilled its
+    // radius into the header above and the row area below — pixels the band
+    // erase (which clears only kCurveY..kCurveY+kCurveH) never cleaned up, so
+    // they smeared into the borders as you dragged the value. The plotting band
+    // is therefore inset vertically by the radius at BOTH ends: the curve and
+    // its vertices live inside [kCurveY+kDotR, kCurveY+kCurveH-kDotR], so a dot
+    // can graze the inset edge but its full extent still lands inside the
+    // erasable band. The erase rect itself is left at the full height.
+    static constexpr int16_t kDotR   = 3;     // vertex circle radius
+    static constexpr int16_t kInsetY = kDotR; // top & bottom breathing room
+
 private:
     Arduino_GFX* gfx_ = nullptr;
     bool  dirty_ = true;

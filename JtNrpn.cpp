@@ -116,6 +116,25 @@ bool Receiver::handleCC(uint8_t cc, uint8_t value) {
                                      (static_cast<uint16_t>(dataMsb_) << 7) |
                                      (value & 0x7F));
 
+            // ── Reserved control-plane addresses bypass layer masking ───────
+            // The status feeds (kStatusAddr 0x3FFF, kArpStatusAddr 0x3FFE) and
+            // the resync command (kResyncRequest 0x3F00) live at msb 126..127,
+            // a band params.yaml never allocates: real ParamIDs decode to msb
+            // <= 17, and even a layer-B address (bit 13 set) tops out at msb 81.
+            // These are NOT parameters and must NOT be masked — kStatusAddr has
+            // bit 13 set, so `raw & kIdMask` would fold 0x3FFF down to 0x1FFF
+            // and the trampoline's `== kStatusAddr` compare could never match.
+            // That was the exact reason the sequencer/arp playhead feedback was
+            // dead: every status word arrived pre-mangled into a phantom
+            // layer-B write to 0x1FFF/0x1FFE. Match on the RAW address, before
+            // the layer bit is touched — the same rule the header already
+            // demanded for the resync command, now applied to the whole band.
+            if (msb_ >= kReservedMsbFloor) {
+                if (cb_) cb_(raw, normFrom14(v), /*layer=*/0u, ctx_);
+                dataMsb_ = 0xFF;
+                return true;
+            }
+
             // Strip the layer out of the address before it is treated as a
             // ParamID — an unmasked id matches nothing in the table and the
             // whole of layer B would look like unknown traffic.

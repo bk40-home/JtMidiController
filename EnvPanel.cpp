@@ -93,8 +93,11 @@ void EnvPanel::drawCurve(const EnvShape& e, uint16_t colour, bool withGrid) {
     const int16_t L = kPadX;
     const int16_t R = static_cast<int16_t>(kScreenW - kPadX);
     const int16_t W = static_cast<int16_t>(R - L);
-    const int16_t T = kCurveY;
-    const int16_t B = static_cast<int16_t>(kCurveY + kCurveH);
+    // Inset the vertical extent by the vertex radius (fault 4): peakY lands on
+    // T and sustY on B, so pulling both in by kInsetY keeps the whole dot
+    // inside the erasable band instead of bleeding into the header/footer.
+    const int16_t T = static_cast<int16_t>(kCurveY + kInsetY);
+    const int16_t B = static_cast<int16_t>(kCurveY + kCurveH - kInsetY);
     const int16_t H = static_cast<int16_t>(B - T);
 
     // ── Segment widths ──────────────────────────────────────────────────────
@@ -171,8 +174,8 @@ void EnvPanel::drawCurve(const EnvShape& e, uint16_t colour, bool withGrid) {
     segment(xR, sustY, xE, B,     exponentOf(e.curveR));   // release: sustain -> 0
 
     // Vertex dots — the breakpoints you would grab if this were draggable.
-    gfx_->fillCircle(xD, peakY, 3, colour);
-    gfx_->fillCircle(xR, sustY, 3, colour);
+    gfx_->fillCircle(xD, peakY, kDotR, colour);
+    gfx_->fillCircle(xR, sustY, kDotR, colour);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -80,7 +80,23 @@ private:
     // in this file already correctly treats its own bool state as
     // "true == pressed", so centralising the inversion here means the
     // edge-detection logic in poll() needed no other changes.
-    bool readPressed(uint8_t i) { return dev_.getSwitchStatus(i) == 0; }
+    bool readPressed(uint8_t i) { return dev_.getSwitchStatus(physical(i)) == 0; }
+
+    // ── Logical → physical channel remap (fault 8) ──────────────────────────
+    // The M5 ByteButton unit numbers its channels 0..7 RIGHT-to-LEFT: physical
+    // channel 0 is the RIGHTMOST button, channel 7 the leftmost (screen-side).
+    // Every consumer of this class — page shortcuts, LED page colours, toggle
+    // bindings — wants logical 0 to be the screen-side button and logical 7 the
+    // rightmost, so the button under your left thumb selects the first page.
+    // Rather than flip the index at each of those call sites (and risk reads
+    // and LED writes disagreeing, lighting the mirror-image button), the whole
+    // class speaks LOGICAL indices and mirrors to hardware HERE, at the two
+    // places — readPressed() and setLed() — that actually touch the device.
+    // The 9th indicator LED (index 8) is not a button and is never passed in
+    // here; only 0..7 are mirrored.
+    static constexpr uint8_t physical(uint8_t logical) {
+        return static_cast<uint8_t>((kNumButtons - 1) - logical);
+    }
 
     UnitByte dev_;
     bool     btnCurrent_[kNumButtons]      = {};

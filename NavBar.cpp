@@ -21,13 +21,18 @@ constexpr uint16_t C_TABBG  = 0x1082;
 // ─────────────────────────────────────────────────────────────────────────────
 
 void NavBar::draw(uint8_t pageIdx, uint8_t subIdx, const char* patchName,
-                  uint8_t activeVoices, uint8_t maxVoices) {
+                  uint8_t activeVoices, uint8_t maxVoices,
+                  uint8_t editLayer, bool dimB) {
     if (!gfx_) return;
 
+    const bool onChipPage = (pageIdx == kLayerChipPage);
     const bool changed = dirty_
                       || pageIdx != lastPage_
                       || subIdx  != lastSub_
-                      || activeVoices != lastVoices_;
+                      || activeVoices != lastVoices_
+                      // The chip only exists on PERF, so its state only forces a
+                      // repaint there — elsewhere layer/dimB changes are invisible.
+                      || (onChipPage && (editLayer != lastLayer_ || dimB != lastDimB_));
     if (!changed) return;
 
     const JtNav::Page& pg = JtNav::page(pageIdx);
@@ -56,6 +61,29 @@ void NavBar::draw(uint8_t pageIdx, uint8_t subIdx, const char* patchName,
         const int16_t cx = static_cast<int16_t>(kScreenW - 12 - (maxVoices - 1 - i) * 11);
         if (i < activeVoices) gfx_->fillCircle(cx, 12, 3, C_ACCENT);
         else                  gfx_->drawCircle(cx, 12, 3, C_DIM);
+    }
+
+    // ── EDIT-layer chip (fault 2) — PERF page only ──────────────────────────
+    // "A | B": the ACTIVE edit target is orange, the other is dim. In Single
+    // mode layer B is not sounding, so its letter is drawn EXTRA dim as a cue —
+    // but it stays tappable, because you still edit B to prepare a layered or
+    // split patch before switching mode. The dim colour reuses the tab-bg grey
+    // so "disabled" reads consistently with the rest of the header.
+    if (onChipPage) {
+        const uint16_t aCol = (editLayer == 0) ? C_ACCENT : C_DIM;
+        const uint16_t bCol = (editLayer == 1) ? C_ACCENT
+                                               : (dimB ? C_TABBG : C_DIM);
+        gfx_->fillRect(kChipX, kChipY, kChipW, kChipH, C_BG);
+        gfx_->setTextSize(2);
+        gfx_->setTextColor(aCol, C_BG);
+        gfx_->setCursor(kChipX, static_cast<int16_t>(kChipY + 1));
+        gfx_->print("A");
+        gfx_->setTextColor(C_DIM, C_BG);
+        gfx_->setCursor(static_cast<int16_t>(kChipX + 20), static_cast<int16_t>(kChipY + 1));
+        gfx_->print("|");
+        gfx_->setTextColor(bCol, C_BG);
+        gfx_->setCursor(static_cast<int16_t>(kChipX + 40), static_cast<int16_t>(kChipY + 1));
+        gfx_->print("B");
     }
 
     gfx_->drawFastHLine(0, static_cast<int16_t>(kHeaderH - 1), kScreenW, C_RULE);
@@ -90,6 +118,8 @@ void NavBar::draw(uint8_t pageIdx, uint8_t subIdx, const char* patchName,
     lastPage_   = pageIdx;
     lastSub_    = subIdx;
     lastVoices_ = activeVoices;
+    lastLayer_  = editLayer;
+    lastDimB_   = dimB;
     dirty_      = false;
 }
 
@@ -142,6 +172,15 @@ NavBar::Hit NavBar::hitTest(uint8_t pageIdx, int16_t x, int16_t y,
     // Row 1: only the page NAME is a control, not the whole header — otherwise
     // a tap near the voice dots would open the menu unexpectedly.
     if (y < kHeaderH) {
+        // The edit-layer chip sits in row 1 on the PERF page only. Test it
+        // first: it lives well right of the page-name hit zone (x < 90), so
+        // the two never overlap, but being explicit keeps them independent.
+        if (pageIdx == kLayerChipPage
+            && x >= kChipX && x < static_cast<int16_t>(kChipX + kChipW)
+            && y >= kChipY && y < static_cast<int16_t>(kChipY + kChipH)) {
+            out = (x < kChipMidX) ? 0u : 1u;   // left half = A, right half = B
+            return Hit::LayerChip;
+        }
         if (x < 90) return Hit::PageMenu;
         return Hit::None;
     }

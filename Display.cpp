@@ -40,7 +40,7 @@ Arduino_GFX* jtDisplayBegin() {
     s_gfx = new Arduino_ST7796(
         s_bus,
         Config::DISP_RST,     // -1: reset is via the TCA9554, see resetPanel()
-        3,                    // rotation
+        1,                    // rotation changed to 1 as moved lcoation
         true,                 // IPS
         Config::DISP_WIDTH,   // 320 native
         Config::DISP_HEIGHT); // 480 native

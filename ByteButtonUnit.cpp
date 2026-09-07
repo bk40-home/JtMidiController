@@ -112,7 +112,11 @@ void ByteButtonUnit::clearLongPress(uint8_t i) {
 
 void ByteButtonUnit::setLed(uint8_t ch, uint32_t rgb) {
     if (!present_ || ch >= kNumLeds) return;
-    dev_.setRGB888(ch, rgb);
+    // Buttons 0..7 are mirrored to hardware (see physical()); the 9th channel
+    // is the standalone indicator LED, which has no left/right sense and must
+    // pass through unmapped — physical(8) would underflow to 255.
+    const uint8_t hw = (ch < kNumButtons) ? physical(ch) : ch;
+    dev_.setRGB888(hw, rgb);
 }
 
 void ByteButtonUnit::setAllLeds(uint32_t rgb) {

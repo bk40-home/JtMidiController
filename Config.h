@@ -35,7 +35,7 @@ static constexpr uint32_t I2C_CLOCK_HZ  = 50000;
 // ─────────────────────────────────────────────────────────────────────────────
 static constexpr uint8_t  UART_TX_PIN   = 17;
 static constexpr uint8_t  UART_RX_PIN   = 18;
-static constexpr uint32_t UART_BAUD     = 1000000;
+static constexpr uint32_t UART_BAUD     = 115200;
 // ESP32-S3 UART peripheral index (0 = debug console, 1 = Teensy link)
 static constexpr uint8_t  UART_NUM      = 1;
 
@@ -132,6 +132,17 @@ static constexpr int16_t  DRAG_DEADZONE_PX   = 6;
 // gone: the touch controller zeroes its coordinates on release, which made
 // the old release-frame swipe test read plain taps as page flips.
 static constexpr int16_t  TWO_FINGER_SWIPE_PX = 60;
+
+// Fault 6: the FT6336 intermittently drops its SECOND contact for a frame or
+// two mid-swipe (and occasionally both contacts on a fast move). The old
+// gesture required pts >= 2 on every single frame, so one dropout either
+// stalled the travel test or — if both fingers blinked out — reset the gesture
+// and re-latched its start-x, throwing away the accumulated travel and making
+// the swipe feel like it "didn't take". The gesture now survives up to this
+// many consecutive sub-two-contact frames before it gives up; at the ~30 ms
+// poll interval, 4 frames ≈ 120 ms of grace, comfortably longer than a sensor
+// blink but far shorter than a deliberate lift-and-retry.
+static constexpr uint8_t  TWO_FINGER_DROP_GRACE = 4;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Pot filtering — ResponsiveAnalogRead tuning

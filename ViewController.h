@@ -103,6 +103,12 @@ public:
 
     void setPage(uint8_t page);
     void setSubTab(uint8_t sub);
+
+    // Fault 9: advance the current page's own "views" one step, wrapping.
+    // Sequencer cycles its edit lane; multi-tab pages step the sub-tab;
+    // single-view pages do nothing. Bound to re-pressing the active page's
+    // ByteButton.
+    void advanceActivePageView();
     uint8_t page()   const { return page_; }
     uint8_t subTab() const { return sub_; }
 
@@ -244,6 +250,11 @@ private:
     bool     twoFinger_      = false;   // a 2-contact gesture owns the input
     bool     twoFingerFired_ = false;   // fired once; ignore further travel
     int16_t  twoFingerX0_    = 0;       // primary-contact x at gesture start
+    uint8_t  twoFingerDrop_  = 0;       // consecutive frames seen with <2 contacts
+                                        // (fault 6): tolerated up to
+                                        // Config::TWO_FINGER_DROP_GRACE before the
+                                        // gesture is torn down, so a flaky second
+                                        // contact doesn't discard the swipe.
 
     // ── Engine status feed (NRPN 0x3FFF) + HOME state ───────────────────────
     // Written by applyStatus() from the rx trampoline; read by render() for
@@ -257,6 +268,7 @@ private:
     uint32_t lastRxMs_   = 0;
     uint8_t  patchSlot_  = 0xFF;
     uint16_t ordMasterVol_ = 0xFFFF;   // resolved once in begin()
+    uint16_t ordPerfMode_  = 0xFFFF;   // resolved once in begin() (fault 2 chip)
     bool     homeVolDrag_  = false;    // finger owns the volume bar
 
     // ── SEQ / ARP step grid ─────────────────────────────────────────────────

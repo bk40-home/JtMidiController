@@ -71,6 +71,18 @@ float    normFrom14(uint16_t v14);
 //                    this. Sent by the ESP32 at boot.
 static constexpr uint16_t kResyncRequest = 0x3F00;
 
+// The NRPN MSB (bits 13..7) at or above which an address is reserved control
+// plane, NOT a parameter. The reserved addresses span two MSB rows:
+//   kResyncRequest  0x3F00 → msb 126
+//   kArpStatusAddr  0x3FFE → msb 127
+//   kStatusAddr     0x3FFF → msb 127
+// Real ParamIDs are (section <= 17) << 7 | index, so a plain param maxes at
+// msb 17; even a layer-B param (bit 13 set) only reaches msb 81 (0x28FF >> 7).
+// 126 therefore sits safely above every real address and below the whole
+// reserved band. The Receiver tests the RAW msb against this to route reserved
+// traffic UNMASKED; see JtNrpn.cpp.
+static constexpr uint8_t  kReservedMsbFloor = 126;
+
 // ── Layer addressing (Performance mode) ──────────────────────────────────────
 // Bit 13 of an NRPN number means "layer B". ParamIDs are (section << 7) | index
 // with sections 0..17, so bits 13..11 are free by construction and an older

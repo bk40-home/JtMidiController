@@ -105,6 +105,8 @@ void ViewController::begin(JtParam::CcSink sink, Arduino_GFX* gfx) {
         ordArpRatchet_[i] = JtParam::ordinalOf(static_cast<uint16_t>(JT::Params::ID::ARP_STEP_RATCHET_1 + i));
     }
     ordMasterVol_ = JtParam::ordinalOf(JT::Params::ID::MASTER_VOLUME);
+    // Fault 2: perf.mode drives the chip's "B is silent in Single" dim cue.
+    ordPerfMode_  = JtParam::ordinalOf(JT::Params::ID::PERF_MODE);
 
     home_.begin(gfx);
 
@@ -388,6 +390,28 @@ void ViewController::setSubTab(uint8_t s) {
     invalidateContent();
 }
 
+void ViewController::advanceActivePageView() {
+    const JtNav::Page& pg = JtNav::page(page_);
+
+    // The Sequencer has one sub-tab but three edit LANES; "next view" there
+    // means the next lane, not the next tab. Kept as its own case so the grid's
+    // lane colour and the SEL/VAL row mirror stay in step, exactly as the old
+    // Sequencer-only handler did.
+    if (pg.kind == JtNav::PageKind::Sequencer) {
+        const JtView::SeqPanel::Lane l = seq_.toggleLane();
+        syncSeqLaneRows(l);
+        return;
+    }
+
+    // Every other page: step the sub-tab, wrapping past the last back to 0.
+    // The overlay tab (ENV only) counts as one more stop. One real tab → next
+    // wraps to itself and setSubTab() no-ops, so the press is harmless.
+    const uint8_t n = static_cast<uint8_t>(pg.subCount + (pg.hasOverlayTab ? 1 : 0));
+    if (n <= 1) return;                                   // nothing to cycle
+    const uint8_t next = static_cast<uint8_t>((sub_ + 1u) % n);
+    setSubTab(next);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Per loop
 // ─────────────────────────────────────────────────────────────────────────────
@@ -520,7 +544,15 @@ void ViewController::flushDirty() {
 void ViewController::render() {
     if (!gfx_) return;
 
-    nav_.draw(page_, sub_, patchName_, 0, 8);   // self-guarded
+    // dimB drives the chip's "layer B is silent" cue. Only the PERF page shows
+    // the chip, so the mode probe (a toEng bucket-map) runs only there — every
+    // other page passes false without touching the store.
+    bool dimB = false;
+    if (page_ == JtView::NavBar::kLayerChipPage && ordPerfMode_ != 0xFFFF) {
+        const ParamDesc* d = JtParam::descAt(ordPerfMode_);
+        if (d) dimB = (JtParam::normToIndex(*d, store_.get(ordPerfMode_)) == 0); // 0 = Single
+    }
+    nav_.draw(page_, sub_, patchName_, 0, 8, editLayer_, dimB);   // self-guarded
 
     if (nav_.isMenuOpen()) {
         nav_.drawPageMenu(page_);   // self-guarded: paints once per open
@@ -662,16 +694,18 @@ void ViewController::handleButtons(ByteButtonUnit& buttons) {
             // muscle memory learned it before HOME existed.
             const uint8_t target = static_cast<uint8_t>(i + 1);
 
-            // Pressing the CURRENT page's own button is normally a no-op
-            // (setPage early-returns on p==page_).  On the Sequencer page we
-            // repurpose that dead press to toggle the gate/aux edit lane —
-            // "press where you already are to switch lane".  The GRID shows
-            // which lane is active by its bar colour (orange gate / cyan aux).
-            // A matching button-LED tint is deferred (needs a LedManager pass).
-            if (target == page_
-                && JtNav::page(page_).kind == JtNav::PageKind::Sequencer) {
-                const JtView::SeqPanel::Lane l = seq_.toggleLane();
-                syncSeqLaneRows(l);          // point SEL/VAL mirror at the lane
+            // Pressing the CURRENT page's own button used to be a dead no-op
+            // everywhere except the Sequencer (where it toggled the edit lane).
+            // Fault 9 generalises that "press where you already are to cycle"
+            // gesture to ALL pages: it now advances through whatever views the
+            // page offers, wrapping back to the first.
+            //   • Sequencer            → cycle Gate → Aux → Arp edit lane.
+            //   • pages with >1 tab    → advance the sub-tab (with overlay).
+            //   • single-view pages    → nothing to cycle, stays put.
+            // A page with only one tab wraps to itself, so setSubTab() no-ops
+            // and the press is silently inert — no surprise flip, no cost.
+            if (target == page_) {
+                advanceActivePageView();
             } else {
                 setPage(target);
             }
@@ -793,6 +827,7 @@ void ViewController::handleTouch(const TouchInput& touch) {
     // menu would leave the menu showing one page and the content another.
     const uint8_t pts = nav_.isMenuOpen() ? 0 : touch.pointCount();
     if (pts >= 2) {
+        twoFingerDrop_ = 0;             // solid two-contact frame — reset grace
         if (!twoFinger_) {
             twoFinger_      = true;
             twoFingerFired_ = false;
@@ -815,9 +850,20 @@ void ViewController::handleTouch(const TouchInput& touch) {
         return;
     }
     if (twoFinger_) {
-        // Down to one or zero contacts: swallow everything until a clean
-        // release, so the trailing finger cannot tap or drag anything.
-        if (pts == 0) twoFinger_ = false;
+        // Fewer than two contacts, but a gesture is in flight. This is usually
+        // the sensor briefly losing the second finger, NOT a deliberate lift —
+        // so DON'T tear down immediately (that would drop twoFingerX0_ and the
+        // next solid frame would re-latch it, discarding the travel so far).
+        // Count the lean frames; keep the gesture — and its start-x — alive
+        // until the grace window is spent, THEN release. Travel is only ever
+        // measured on solid (pts >= 2) frames above, so the corpse x of a
+        // zero-contact frame is never mistaken for finger movement.
+        if (pts == 0 || pts == 1) {
+            if (++twoFingerDrop_ >= Config::TWO_FINGER_DROP_GRACE) {
+                twoFinger_     = false;
+                twoFingerDrop_ = 0;
+            }
+        }
         return;
     }
 
@@ -825,9 +871,18 @@ void ViewController::handleTouch(const TouchInput& touch) {
     if (nav_.isMenuOpen()) {
         if (touched && !touchPrev_) {
             touchPrev_ = true;
+            // Latch the LANDING position. menuPick() must run against this on
+            // release, NOT against the live (x,y): the driver zeroes its
+            // coordinates the frame the finger lifts (TouchInput.cpp), so a
+            // release-frame menuPick(0,0) always resolved to row 0 (HOME) and
+            // the menu appeared to select nothing you actually tapped. The
+            // menu is modal, so the normal press path never runs — touchStart
+            // is free to hold the menu's landing point.
+            touchStartX_ = x;
+            touchStartY_ = y;
         } else if (!touched && touchPrev_) {
             touchPrev_ = false;
-            const uint8_t p = nav_.menuPick(x, y);
+            const uint8_t p = nav_.menuPick(touchStartX_, touchStartY_);
             nav_.closePageMenu();
             if (p != 0xFF) setPage(p);
             // Repair ONLY the rect the menu covered (it overlaps the sub-tab
@@ -946,6 +1001,13 @@ void ViewController::handleTouch(const TouchInput& touch) {
 
         if (h == JtView::NavBar::Hit::PageMenu) {
             nav_.openPageMenu();
+
+        } else if (h == JtView::NavBar::Hit::LayerChip) {
+            // Tapping A or B on the PERF header retargets parameter edits to
+            // that layer. setEditLayer() flushes any pending edit against the
+            // OLD layer first, then resyncs the new layer's values — a tap that
+            // hits the layer already selected is a no-op (it early-returns).
+            setEditLayer(out);
 
         } else if (h == JtView::NavBar::Hit::SubTab) {
             setSubTab(out);

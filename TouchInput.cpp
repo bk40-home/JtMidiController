@@ -124,6 +124,12 @@ void TouchInput::transformPoint(uint16_t nx, uint16_t ny,
     if (nx >= Config::TOUCH_NATIVE_W) nx = Config::TOUCH_NATIVE_W - 1;
     if (ny >= Config::TOUCH_NATIVE_H) ny = Config::TOUCH_NATIVE_H - 1;
 
-    outX = (Config::TOUCH_NATIVE_H - 1) - ny;  // 0..479
-    outY = nx;                                  // 0..319
+// Rotation 3
+    // outX = (Config::TOUCH_NATIVE_H - 1) - ny;  // 0..479
+    // outY = nx;                                  // 0..319
+
+// Roation 1
+    outX = ny;                                 // 0..479
+    outY = (Config::TOUCH_NATIVE_W - 1) - nx;  // 0..319
+
 }
