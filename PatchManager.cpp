@@ -232,10 +232,15 @@ void PatchManager::handleSavePush() {
 
 
         const float* raw = vc_->store().raw();
+        // Save under the slot's CURRENT name. A rename writes names_[slot] via
+        // setName() but does NOT write the .bin; the save is what persists the
+        // patch. Passing loadedName_ here (the last LOADED patch's name, or
+        // "UNNAMED" on a fresh boot) made save() overwrite a just-typed name.
+        const char* slotName = store_->getName(highlightedSlot_);
+        const char* saveName = slotName ? slotName
+                             : (loadedName_[0] ? loadedName_ : "UNNAMED");
         const bool ok = store_->save(highlightedSlot_, raw,
-                                     JT::Params::kParamCount, loadedName_[0]
-
-                                     ? loadedName_ : "UNNAMED");
+                                     JT::Params::kParamCount, saveName);
 
 
 

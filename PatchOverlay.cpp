@@ -224,13 +224,16 @@ void PatchOverlay::drawRows(Arduino_GFX* gfx, bool all) {
                       isHi ? COL_ACCENT : COL_PANEL);
 
         const char* name  = pm_->slotName(slot);
-        const bool  empty = (name == nullptr || name[0] == '\0');
+        // "Empty" means no patch DATA, not merely no name: a renamed-but-unsaved
+        // slot has a name but no .bin and must still read as EMPTY so it's clear
+        // the patch hasn't been written yet.
+        const bool  empty = !pm_->slotExists(slot);
 
         char line[28];
         snprintf(line, sizeof(line), "%3u %c %s",
                  slot + 1,
                  (slot == loaded) ? '*' : ' ',      // * marks the live patch
-                 empty ? "- EMPTY -" : name);
+                 empty ? "- EMPTY -" : (name ? name : "UNNAMED"));
 
         gfx->setTextSize(2);
         gfx->setTextColor(isHi ? COL_PANEL

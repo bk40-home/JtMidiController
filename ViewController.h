@@ -47,6 +47,13 @@ public:
     void begin(JtParam::CcSink sink, Arduino_GFX* gfx);
 
     void update(Angle8Unit& angle, Encoder8Unit& encoder, ByteButtonUnit& buttons);
+
+    // Drain the dirty-parameter queue to NRPN without touching input. Safe to
+    // call while a modal (patch overlay, name editor) owns the input loop:
+    // update() is gated out there, so a patch load's markDirty() values would
+    // otherwise sit unsent until the modal closed — the "load didn't take
+    // effect until I left the screen" bug. This sends them immediately.
+    void pumpOutbound();
     void render();
 
     // Touch. Takes the whole unit, not one point: paging is a TWO-finger

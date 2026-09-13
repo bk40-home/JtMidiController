@@ -416,6 +416,19 @@ void ViewController::advanceActivePageView() {
 // Per loop
 // ─────────────────────────────────────────────────────────────────────────────
 
+void ViewController::pumpOutbound() {
+    // Modal-safe subset of update(): no input handling, just push pending
+    // parameter changes onto the wire. A patch load marks every param dirty via
+    // loadAll(markDirty=true); this flushes them so the load is audible at once,
+    // even while the patch overlay still owns the screen. The visible_when
+    // rebuild is kept because a loaded patch can flip a dependency (filter
+    // engine, osc wave) and the rows must match when the overlay closes.
+    if (store_.anyDirty()) {
+        if (refreshRows()) invalidateContent();
+    }
+    flushDirty();
+}
+
 void ViewController::update(Angle8Unit& angle, Encoder8Unit& encoder,
                             ByteButtonUnit& buttons) {
     // The Encoder8 scene switch selects the ByteButtons' role: OFF = page
@@ -517,6 +530,16 @@ void ViewController::setEditLayer(uint8_t layer) {
     flushDirty();
 
     editLayer_ = want;
+
+    // Keep the perf.edit_target menu row showing the real target. It is not an
+    // emitted param (the firmware ignores it), so write it QUIETLY — no dirty
+    // mark, no NRPN — purely so the VOICE-page selector and the header chip
+    // read back the layer we actually switched to.
+    {
+        const ParamDesc* et = JtParam::descOf(JT::Params::ID::PERF_EDIT_TARGET);
+        if (et) store_.setQuietById(JT::Params::ID::PERF_EDIT_TARGET,
+                                    JtParam::indexToNorm(*et, editLayer_));
+    }
 
     // Only one value per parameter is held here, so everything on screen now
     // belongs to the layer we just left. Ask for the new layer's values; the
@@ -801,6 +824,17 @@ void ViewController::handleEncoders(Encoder8Unit& encoder) {
         const int32_t delta = encoder.delta(i);
         if (delta == 0) continue;
 
+        // edit_target is the layer selector, not a stored param (see
+        // commitSelect). Rotating it must retarget the edit layer, not write a
+        // dead NRPN. Step the option and map A/B/Both -> binary layer.
+        if (d->id == JT::Params::ID::PERF_EDIT_TARGET) {
+            const float stepped = JtParam::step(*d, store_.get(o), delta);
+            const uint8_t opt = JtParam::normToIndex(*d, stepped);
+            setEditLayer(opt == 1u ? 1u : 0u);
+            focusRow_ = row;
+            continue;
+        }
+
         store_.set(o, JtParam::step(*d, store_.get(o), delta));
         focusRow_ = row;
     }
@@ -1070,6 +1104,22 @@ uint16_t ViewController::takeSelectPopupRequest() {
 void ViewController::commitSelect(uint16_t paramId, uint8_t optionIndex) {
     const ParamDesc* d = JtParam::descOf(paramId);
     if (!d || d->type != Type::Select) return;
+
+    // perf.edit_target (A / B / Both) is the edit-LAYER selector, not engine
+    // state — the firmware explicitly ignores its NRPN ("editor-only"). It must
+    // drive setEditLayer() here instead, or selecting "B" would change nothing
+    // and every edit would keep landing on layer A (the exact "I picked B but A
+    // changed" fault). "Both" has no single-value representation on this
+    // one-bank controller, so it maps to layer A; the header A|B chip and this
+    // menu therefore agree on a binary target. We do NOT store/emit the param:
+    // it carries no engine meaning and setEditLayer() already handles the flush
+    // + resync.
+    if (paramId == JT::Params::ID::PERF_EDIT_TARGET) {
+        setEditLayer(optionIndex == 1u ? 1u : 0u);   // 0=A, 1=B, 2=Both -> A
+        if (refreshRows()) invalidateContent();
+        return;
+    }
+
     store_.setById(paramId, JtParam::indexToNorm(*d, optionIndex));
 
     // A select may be a visible_when dependency (filter engine, osc wave), so

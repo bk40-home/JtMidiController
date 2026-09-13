@@ -198,6 +198,14 @@ public:
 
     }
 
+    // Whether the slot actually holds patch DATA (a .bin), independent of
+    // whether it has a name. A rename writes a name but no data, so the display
+    // must key "empty" off this, not off the name — otherwise a renamed-but-
+    // unsaved slot looks saved yet fails to load.
+    bool slotExists(uint8_t slot) const {
+        return store_ ? store_->exists(slot) : false;
+    }
+
 
 
     // ── Name editing (Phase 3) ───────────────────────────────────────────────

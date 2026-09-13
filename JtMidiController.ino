@@ -336,6 +336,13 @@ void loop() {
         // ticking while the overlay is the active surface.
         patchManager.update();
 
+        // A patch LOAD marks every parameter dirty but view.update() (the
+        // normal flush path) is gated out while this modal is active. Pump the
+        // outbound queue here so the loaded patch is sent immediately, instead
+        // of only when the overlay closes ("load didn't take effect until I
+        // left the screen").
+        view.pumpOutbound();
+
         if (gfx) patchOverlay.draw(gfx);
 
         // Floating panel, same close-repair as SelectPopup: only the covered
