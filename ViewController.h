@@ -241,6 +241,12 @@ private:
     bool    contentPending_ = false;   // an erase is in progress
     int16_t eraseY_         = 0;       // first line NOT yet cleared
 
+    // Set by handleInboundCC when a completed inbound parameter arrives;
+    // consumed once per loop in update() to run a SINGLE refreshRows() after a
+    // burst instead of one per parameter. Inbound writes use setQuiet(), so
+    // they never mark the store dirty — this flag is the inbound equivalent.
+    bool    inboundRowsDirty_ = false;
+
     uint16_t selectPopupReqId_ = 0;
     bool     patchOverlayReq_  = false;
 

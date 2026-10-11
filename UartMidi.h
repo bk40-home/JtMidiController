@@ -2,7 +2,7 @@
 // UartMidi.h — raw MIDI byte pipe to the JT-8000 v2 firmware (Phase D)
 // =============================================================================
 // A DUMB PIPE. It moves CC/note/bend bytes between the ESP32 and the Teensy at
-// Config::UART_BAUD (1 Mbaud) and does nothing else.
+// Config::UART_BAUD (115200 baud) and does nothing else.
 //
 // WHAT WAS REMOVED, AND WHY IT MATTERED
 //   The Phase C version owned the NRPN protocol: it took a 7-bit v1 CC number,

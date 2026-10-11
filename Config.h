@@ -20,8 +20,12 @@ static constexpr uint8_t  I2C_SCL       = 7;
 static constexpr uint32_t I2C_CLOCK_HZ  = 50000;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// UART to Teensy — v2 NRPN link at 1 Mbaud (Phase C).  MUST equal the
+// UART to Teensy — v2 NRPN link at 115200 baud (Phase C).  MUST equal the
 // Teensy's Board::kSerial1MidiBaud.  Not DIN-compatible (both ends ours).
+// (Historical note: earlier revisions of this header and the broadcast pacing
+// rationale claimed 1 Mbaud; the link has always run at Config::UART_BAUD
+// below, i.e. 115200, and the pacing/buffering assumptions were corrected to
+// match — see UART_RX_BUFFER and the ESP32 RX-overflow fix.)
 //
 // WIRING:
 //   ESP32 GPIO 17 (TX) ─── Teensy pin 0 (RX1)
@@ -38,6 +42,23 @@ static constexpr uint8_t  UART_RX_PIN   = 18;
 static constexpr uint32_t UART_BAUD     = 115200;
 // ESP32-S3 UART peripheral index (0 = debug console, 1 = Teensy link)
 static constexpr uint8_t  UART_NUM      = 1;
+
+// Inbound RX ring buffer for UART1 (NRPN from the Teensy).  MUST be applied
+// with TeensySerial.setRxBufferSize() BEFORE begin(), or it is ignored.
+//
+// WHY THIS EXISTS: the Arduino-ESP32 default RX buffer is only 256 bytes,
+// which at 115200 8N1 (86.8 us/byte) is ~22 ms of wire.  A patch load / "send
+// all" / resync makes the Teensy broadcast every parameter back-to-back —
+// ~180-270 ms of solid bytes for a full state.  Any single loop() iteration
+// that runs longer than the buffer takes to fill (a modal full-screen draw,
+// FFat patch I/O, a content frame) then overflows the FIFO and CC bytes are
+// dropped SILENTLY.  Because the NRPN receiver's address is sticky, a dropped
+// CC99/98 pair makes the following CC6/38 data land on the WRONG ParamID — the
+// "load a patch, open the filter page, wrong value shown" symptom.
+//
+// 4096 bytes = ~355 ms of wire, enough to hold an entire full-state dump even
+// if a frame stalls.  Costs 4 KB of heap, allocated once at begin().
+static constexpr size_t   UART_RX_BUFFER = 4096;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Display — ST7796S 480×320 SPI on Waveshare ESP32-S3-Touch-LCD-3.5

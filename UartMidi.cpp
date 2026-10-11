@@ -13,7 +13,7 @@
 static HardwareSerial TeensySerial(Config::UART_NUM);
 
 struct UartMidiSettings : public midi::DefaultSettings {
-    static const long BaudRate = Config::UART_BAUD;   // 1 Mbaud — see Config.h
+    static const long BaudRate = Config::UART_BAUD;   // 115200 — see Config.h
 };
 
 static MIDI_NAMESPACE::SerialMIDI<HardwareSerial, UartMidiSettings>*
@@ -26,6 +26,15 @@ static UartMidi* sInstance = nullptr;
 
 void UartMidi::begin() {
     sInstance = this;
+
+    // Enlarge the RX ring buffer BEFORE begin() (a later call is ignored).
+    // The Arduino-ESP32 default is 256 bytes (~22 ms of wire at 115200 8N1);
+    // a full-state NRPN dump is ~180-270 ms of solid bytes, so the default
+    // overflows and drops CC bytes mid-cluster whenever a loop() iteration
+    // stalls longer than the buffer takes to fill. A dropped CC99/98 address
+    // pair then lands the following CC6/38 data on the WRONG ParamID, because
+    // the receiver's address is sticky. See Config::UART_RX_BUFFER.
+    TeensySerial.setRxBufferSize(Config::UART_RX_BUFFER);
 
     // Explicit pin mapping — the S3's UART1 defaults are not ours.
     TeensySerial.begin(Config::UART_BAUD, SERIAL_8N1,

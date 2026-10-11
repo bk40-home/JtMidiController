@@ -455,7 +455,14 @@ void ViewController::update(Angle8Unit& angle, Encoder8Unit& encoder,
     // apply. Cheap when nothing changed; the content is flushed ONLY when the
     // visible set actually changed — a vanished row leaves pixels behind that
     // no remaining widget owns, so the band erase has to reclaim them.
-    if (store_.anyDirty()) {
+    //
+    // Two triggers, ONE rebuild per loop: a LOCAL edit marks the store dirty;
+    // an INBOUND parameter from the Teensy sets inboundRowsDirty_ via
+    // handleInboundCC (inbound writes use setQuiet, so they never mark the
+    // store dirty). Coalescing both here means a whole "send all" burst costs
+    // exactly one refreshRows(), not one per parameter — see handleInboundCC.
+    if (store_.anyDirty() || inboundRowsDirty_) {
+        inboundRowsDirty_ = false;
         if (refreshRows()) invalidateContent();
     }
 
@@ -1134,10 +1141,25 @@ bool ViewController::handleInboundCC(uint8_t cc, uint8_t value) {
 
     const bool consumed = rx_.handleCC(cc, value);
     if (consumed) {
-        // The Teensy may have changed a visibility dependency. refreshRows()
-        // retargets the pot pickups itself on the unchanged path; the full
-        // reseed happens on the changed path. Either way the pots track.
-        if (refreshRows()) invalidateContent();
+        // A completed inbound parameter MAY have flipped a visibility
+        // dependency (filter engine, osc wave), which changes the visible row
+        // SET and needs a refreshRows()/invalidateContent() pass.
+        //
+        // That pass used to run HERE, once per completed parameter. During a
+        // "send all" / resync burst that is up to ~243 refreshRows() calls
+        // back-to-back inside ONE poll() drain — a real CPU cost, and worse,
+        // any dependency flip fires a full-band content erase mid-drain, which
+        // lengthens the loop iteration and lets the RX FIFO overflow (the very
+        // failure the larger buffer + pumps guard against). So COALESCE: just
+        // flag it, and let update() do a SINGLE refreshRows() per loop after
+        // the whole burst has been drained.
+        //
+        // Display latency is unchanged: the parameter VALUES still repaint every
+        // frame via render()/drawDirty (which diffs the store directly). Only
+        // the structural row-set rebuild is deferred, by at most one loop.
+        // Pot-pickup retargeting also rides refreshRows(), so it likewise
+        // settles on the next update() — one loop, imperceptible.
+        inboundRowsDirty_ = true;
     }
     return consumed;
 }
