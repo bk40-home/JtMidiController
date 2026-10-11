@@ -2,6 +2,7 @@
 // ViewController.cpp — see ViewController.h.
 // =============================================================================
 #include "ViewController.h"
+#include "PatternPresetApply.h"
 
 #include "HwPalette.h"
 
@@ -455,14 +456,7 @@ void ViewController::update(Angle8Unit& angle, Encoder8Unit& encoder,
     // apply. Cheap when nothing changed; the content is flushed ONLY when the
     // visible set actually changed — a vanished row leaves pixels behind that
     // no remaining widget owns, so the band erase has to reclaim them.
-    //
-    // Two triggers, ONE rebuild per loop: a LOCAL edit marks the store dirty;
-    // an INBOUND parameter from the Teensy sets inboundRowsDirty_ via
-    // handleInboundCC (inbound writes use setQuiet, so they never mark the
-    // store dirty). Coalescing both here means a whole "send all" burst costs
-    // exactly one refreshRows(), not one per parameter — see handleInboundCC.
-    if (store_.anyDirty() || inboundRowsDirty_) {
-        inboundRowsDirty_ = false;
+    if (store_.anyDirty()) {
         if (refreshRows()) invalidateContent();
     }
 
@@ -942,6 +936,7 @@ void ViewController::handleTouch(const TouchInput& touch) {
         dragEngaged_ = false;
         touchStartX_ = x;
         touchStartY_ = y;
+        touchStartMs_ = millis();
         touchRow_    = JtView::RowList::kNoRow;
 
         // HOME volume bar: the finger owns it from the landing frame. It is
@@ -1056,6 +1051,31 @@ void ViewController::handleTouch(const TouchInput& touch) {
         } else if (JtNav::page(page_).kind == JtNav::PageKind::Sequencer
                    && !touchMoved_
                    && JtView::SeqPanel::stepAt(touchStartX_, touchStartY_)
+                      != 0xFF
+                   && (millis() - touchStartMs_) >= Config::LONG_PRESS_MS) {
+            // ── Long-press on the grid: pattern-preset browser ──────────────
+            // Checked BEFORE the tap branch so a held press never also paints
+            // the step it landed on. Same threshold as the ByteButton
+            // long-press (Config::LONG_PRESS_MS), so "hold to get more" means
+            // one thing across the controller. The Aux lane has no preset
+            // family; a long-press there does nothing rather than surprising.
+            switch (seq_.lane()) {
+                case JtView::SeqPanel::Lane::Gate:
+                    presetPopupReq_ = static_cast<uint8_t>(
+                        JT::PatternPresets::FamilyId::SeqGate);
+                    break;
+                case JtView::SeqPanel::Lane::Arp:
+                    presetPopupReq_ = static_cast<uint8_t>(
+                        JT::PatternPresets::FamilyId::Arp);
+                    break;
+                case JtView::SeqPanel::Lane::Aux:   // not a rhythmic gate
+                default:
+                    break;
+            }
+
+        } else if (JtNav::page(page_).kind == JtNav::PageKind::Sequencer
+                   && !touchMoved_
+                   && JtView::SeqPanel::stepAt(touchStartX_, touchStartY_)
                       != 0xFF) {
             // ── Tap-grid step entry (standing spec: TAP, not drag) ──────────
             // The tapped bar is the step, the tapped HEIGHT is its value.
@@ -1108,6 +1128,20 @@ uint16_t ViewController::takeSelectPopupRequest() {
     return id;
 }
 
+void ViewController::applyPatternPreset(uint8_t family, uint8_t index) {
+    const JtPresets::ApplyResult r = JtPresets::apply(
+        store_, static_cast<JtPresets::FamilyId>(family), index);
+
+    // A preset can change the step count, the arp mode or a visible_when
+    // dependency (seq.timing_mode hides seq.rate), so rebuild the rows and
+    // repaint the grid. The NRPN sends happen in the normal flushDirty() pass.
+    if (r.changed > 0) {
+        refreshRows();
+        seq_.invalidate();
+        invalidateContent();
+    }
+}
+
 void ViewController::commitSelect(uint16_t paramId, uint8_t optionIndex) {
     const ParamDesc* d = JtParam::descOf(paramId);
     if (!d || d->type != Type::Select) return;
@@ -1141,25 +1175,10 @@ bool ViewController::handleInboundCC(uint8_t cc, uint8_t value) {
 
     const bool consumed = rx_.handleCC(cc, value);
     if (consumed) {
-        // A completed inbound parameter MAY have flipped a visibility
-        // dependency (filter engine, osc wave), which changes the visible row
-        // SET and needs a refreshRows()/invalidateContent() pass.
-        //
-        // That pass used to run HERE, once per completed parameter. During a
-        // "send all" / resync burst that is up to ~243 refreshRows() calls
-        // back-to-back inside ONE poll() drain — a real CPU cost, and worse,
-        // any dependency flip fires a full-band content erase mid-drain, which
-        // lengthens the loop iteration and lets the RX FIFO overflow (the very
-        // failure the larger buffer + pumps guard against). So COALESCE: just
-        // flag it, and let update() do a SINGLE refreshRows() per loop after
-        // the whole burst has been drained.
-        //
-        // Display latency is unchanged: the parameter VALUES still repaint every
-        // frame via render()/drawDirty (which diffs the store directly). Only
-        // the structural row-set rebuild is deferred, by at most one loop.
-        // Pot-pickup retargeting also rides refreshRows(), so it likewise
-        // settles on the next update() — one loop, imperceptible.
-        inboundRowsDirty_ = true;
+        // The Teensy may have changed a visibility dependency. refreshRows()
+        // retargets the pot pickups itself on the unchanged path; the full
+        // reseed happens on the changed path. Either way the pots track.
+        if (refreshRows()) invalidateContent();
     }
     return consumed;
 }

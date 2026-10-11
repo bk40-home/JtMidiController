@@ -105,6 +105,24 @@ public:
     }
     void     commitSelect(uint16_t paramId, uint8_t optionIndex);
 
+    // ── Pattern presets (arp + sequencer gate) ─────────────────────────────
+    // A LONG-PRESS on the SEQ step grid parks a request for the preset family
+    // of the lane on show (Gate -> SeqGate, Arp -> Arp; Aux has none). The .ino
+    // collects it and opens the SelectPopup in list mode — the same
+    // parked-request pattern as the select popup and the PatchOverlay, so the
+    // modal open and its tap-latch discard stay in one place.
+    // Returns true and the family on a pending request.
+    bool takePresetPopupRequest(uint8_t& family) {
+        if (presetPopupReq_ == kNoPresetReq) return false;
+        family = presetPopupReq_;
+        presetPopupReq_ = kNoPresetReq;
+        return true;
+    }
+    // Apply preset `index` of `family` (a JT::PatternPresets::FamilyId value).
+    // Writes go through the store, so the next flushDirty() sends only the
+    // parameters that changed, addressed to the current edit layer.
+    void     applyPatternPreset(uint8_t family, uint8_t index);
+
     JtParam::Store&       store()       { return store_; }
     const JtParam::Store& store() const { return store_; }
 
@@ -241,14 +259,10 @@ private:
     bool    contentPending_ = false;   // an erase is in progress
     int16_t eraseY_         = 0;       // first line NOT yet cleared
 
-    // Set by handleInboundCC when a completed inbound parameter arrives;
-    // consumed once per loop in update() to run a SINGLE refreshRows() after a
-    // burst instead of one per parameter. Inbound writes use setQuiet(), so
-    // they never mark the store dirty — this flag is the inbound equivalent.
-    bool    inboundRowsDirty_ = false;
-
     uint16_t selectPopupReqId_ = 0;
     bool     patchOverlayReq_  = false;
+    static constexpr uint8_t kNoPresetReq = 0xFF;
+    uint8_t  presetPopupReq_   = kNoPresetReq;
 
     // Touch state.
     bool     touchPrev_   = false;
@@ -256,6 +270,7 @@ private:
     uint8_t  touchRow_    = JtView::RowList::kNoRow;
     int16_t  touchStartX_ = 0;
     int16_t  touchStartY_ = 0;
+    uint32_t touchStartMs_ = 0;      // press time — long-press on the SEQ grid
     float    touchStartV_ = 0.0f;
     bool     dragEngaged_ = false;   // dead-zone broken; writes are live
 

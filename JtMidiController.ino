@@ -68,6 +68,7 @@
 #include "LedManager.h"
 #include "NameEditor.h"
 #include "SelectPopup.h"
+#include "PatternPresets.h"
 #include "PatchOverlay.h"
 #include "Display.h"
 
@@ -123,6 +124,24 @@ static void modalDrainEncoders(Encoder8Unit& e) {
         if (e.pressed(i)) e.clearPress(i);
     }
 }
+
+// One commit path for both popup modes, so the touch and encoder branches can
+// never disagree. List mode = a pattern preset (tag - kListTagBase = family);
+// otherwise a SELECT parameter. close() last, so geometry stays valid for the
+// owner's close-repair either way.
+static void commitPopup() {
+    if (selectPopup.isListMode()) {
+        view.applyPatternPreset(
+            static_cast<uint8_t>(selectPopup.resultParamId()
+                                 - SelectPopup::kListTagBase),
+            selectPopup.resultIndex());
+    } else {
+        view.commitSelect(selectPopup.resultParamId(),
+                          selectPopup.resultIndex());
+    }
+    selectPopup.close();
+}
+
 static PatchStore      patchStore;
 static PatchManager    patchManager;
 
@@ -246,21 +265,6 @@ void setup() {
                   static_cast<unsigned>(JT::Params::kSectionCount));
 }
 
-// ── MIDI RX pump ─────────────────────────────────────────────────────────────
-// Drain the UART inside long / variable-latency operations (modal full-screen
-// draws, FFat patch I/O, the content frame) so the RX ring cannot overflow
-// mid-burst when a single loop() iteration would otherwise run longer than the
-// wire takes to fill the buffer. loop() polls the UART once at the top (§2);
-// these extra pumps cover the gaps between that poll and the next iteration.
-// Cheap when nothing is waiting: one while-loop over an empty buffer, no draw.
-// Guarded by the same feature flag as the top-of-loop poll. See UartMidi::poll,
-// Config::UART_RX_BUFFER, and ParamBroadcast (Teensy) for the burst it absorbs.
-static inline void pumpMidiRx() {
-#if JT_ENABLE_UART_MIDI
-    uartMidi.poll();
-#endif
-}
-
 // ── Loop ────────────────────────────────────────────────────────────────────
 
 void loop() {
@@ -323,7 +327,6 @@ void loop() {
         modalDrainEncoders(encoder);
 
         if (gfx) nameEditor.draw(gfx);
-        pumpMidiRx();   // full-screen keyboard draw is not sliced — drain after
 
         // The keyboard paints the FULL screen, so its close is the one case
         // that still needs a full repaint — header band and content both.
@@ -351,7 +354,6 @@ void loop() {
         // PatchManager owns the arm timeout and banner expiry — it must keep
         // ticking while the overlay is the active surface.
         patchManager.update();
-        pumpMidiRx();   // a LOAD does FFat reads here — can block for ms
 
         // A patch LOAD marks every parameter dirty but view.update() (the
         // normal flush path) is gated out while this modal is active. Pump the
@@ -361,7 +363,6 @@ void loop() {
         view.pumpOutbound();
 
         if (gfx) patchOverlay.draw(gfx);
-        pumpMidiRx();
 
         // Floating panel, same close-repair as SelectPopup: only the covered
         // rect is repainted. (A RENAME tap closes the overlay and opens the
@@ -381,9 +382,7 @@ void loop() {
                 selectPopup.handleTouch(touch.tapX(), touch.tapY());
             touch.clearTap();
             if (a == SelectPopup::Action::COMMIT) {
-                view.commitSelect(selectPopup.resultParamId(),
-                                  selectPopup.resultIndex());
-                selectPopup.close();
+                commitPopup();
             } else if (a == SelectPopup::Action::CANCEL) {
                 selectPopup.close();
             }
@@ -394,13 +393,10 @@ void loop() {
         if (d != 0 || push) {
             const SelectPopup::Action a = selectPopup.handleEncoder(d, push);
             if (a == SelectPopup::Action::COMMIT) {
-                view.commitSelect(selectPopup.resultParamId(),
-                                  selectPopup.resultIndex());
-                selectPopup.close();
+                commitPopup();
             }
         }
         if (gfx) selectPopup.draw(gfx);
-        pumpMidiRx();
 
         // The popup is a FLOATING PANEL now — it never touched anything
         // outside its own rect, so on close only that rect is repaired.
@@ -441,8 +437,20 @@ void loop() {
             touch.clearTap();
         }
 
+        // Long-press on the SEQ grid parks a pattern-preset request; open the
+        // same popup in LIST mode. The tag carries the family so the commit
+        // path knows which table the chosen index belongs to.
+        uint8_t presetFamily = 0;
+        if (view.takePresetPopupRequest(presetFamily)) {
+            const JT::PatternPresets::Family& fam = JT::PatternPresets::family(
+                static_cast<JT::PatternPresets::FamilyId>(presetFamily));
+            selectPopup.openList(
+                static_cast<uint16_t>(SelectPopup::kListTagBase + presetFamily),
+                fam.label, fam.names, fam.count, 0);
+            touch.clearTap();   // same latch discard as the select popup above
+        }
+
         patchManager.update();
-        pumpMidiRx();   // a LOAD does FFat reads here — can block for ms
     }
 
     // ── 4. LEDs (rate-limited) ──────────────────────────────────────────
@@ -462,9 +470,7 @@ void loop() {
         // at which point status updates painted straight through the panel.
         if (!nameEditor.isActive() && !selectPopup.isActive()
             && !patchOverlay.isActive()) {
-            pumpMidiRx();     // drain immediately before a frame's SPI work
             view.render();
-            pumpMidiRx();     // and after: a 33 ms frame must not stall RX
         }
     }
 

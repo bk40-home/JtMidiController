@@ -22,9 +22,32 @@ void SelectPopup::open(uint16_t paramId, float t) {
     }
 
     paramId_   = paramId;
-    desc_      = d;
+    title_     = d->label ? d->label : "SELECT";
+    names_     = d->options;
+    listMode_  = false;
     count_     = d->optionCount;
     highlight_ = JtParam::normToIndex(*d, t);
+    begin_();
+}
+
+// ---------------------------------------------------------------------------
+// openList — list mode for non-parameter choices (pattern presets).
+// ---------------------------------------------------------------------------
+void SelectPopup::openList(uint16_t tag, const char* title,
+                           const char* const* names, uint8_t count,
+                           uint8_t current) {
+    if (!names || count == 0) { active_ = false; return; }
+    paramId_   = tag;
+    title_     = title ? title : "SELECT";
+    names_     = names;
+    listMode_  = true;
+    count_     = count;
+    highlight_ = current;
+    begin_();
+}
+
+// Shared tail of both open paths: seed the scroll window and force a full paint.
+void SelectPopup::begin_() {
     if (highlight_ >= count_) highlight_ = static_cast<uint8_t>(count_ - 1);
 
     // Start the window so the current option is visible, centred where possible.
@@ -110,7 +133,7 @@ SelectPopup::Action SelectPopup::handleEncoder(int32_t delta, bool push) {
 // state changed (or every visible row if the scroll window moved).
 // ---------------------------------------------------------------------------
 void SelectPopup::draw(Arduino_GFX* gfx) {
-    if (!active_ || !gfx || !desc_) return;
+    if (!active_ || !gfx || !names_) return;
 
     const uint16_t px   = panelX();
     const uint16_t py   = panelY();
@@ -138,7 +161,7 @@ void SelectPopup::draw(Arduino_GFX* gfx) {
         gfx->setTextColor(COL_ACCENT);
         gfx->setTextSize(2);
         gfx->setCursor(px + 10, py + 9);
-        gfx->print(desc_->label ? desc_->label : "SELECT");
+        gfx->print(title_);
 
         fullRedraw_    = false;
         prevScroll_    = scroll_;
@@ -164,7 +187,7 @@ void SelectPopup::draw(Arduino_GFX* gfx) {
         // transparent on this board's GFX, which renders them unreadable.
         gfx->setTextColor(rowFg, rowBg);
         gfx->setCursor(px + 12, ry + 7);
-        gfx->print(desc_->options[idx] ? desc_->options[idx] : "?");
+        gfx->print(names_[idx] ? names_[idx] : "?");
     }
 
     prevHighlight_ = highlight_;

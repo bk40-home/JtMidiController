@@ -27,6 +27,14 @@
 //   handleEncoder(delta, push) -> same
 //   draw(gfx)                  -> render overlay (full, then dirty rows)
 //   On COMMIT the owner reads resultParamId()/resultIndex(), then close().
+//
+// LIST MODE (pattern presets)
+//   openList(tag, title, names, count) shows an arbitrary static name list with
+//   the same panel, scrolling and commit rules. It exists so the pattern-preset
+//   browser reuses this proven modal instead of growing a second one. In list
+//   mode resultParamId() returns the caller's TAG; tags live at kListTagBase and
+//   above, outside the 14-bit ParamID space (<= 0x3FFF), so the owner can never
+//   mistake a list commit for a parameter commit — isListMode() says which.
 // =============================================================================
 #pragma once
 
@@ -44,6 +52,13 @@ public:
     // No-op (stays inactive) if the parameter is not a SELECT — a stray call
     // cannot open an empty box.
     void open(uint16_t paramId, float t);
+
+    // List mode — see the file header. `names` must have static storage (the
+    // generated preset tables do). No-op on an empty list.
+    static constexpr uint16_t kListTagBase = 0x8000;
+    void openList(uint16_t tag, const char* title,
+                  const char* const* names, uint8_t count, uint8_t current);
+    bool isListMode() const { return listMode_; }
 
     void close()          { active_ = false; }
     bool isActive() const { return active_; }
@@ -83,6 +98,7 @@ private:
     static constexpr uint16_t COL_TITLE  = 0x18E3;
 
     void     clampScroll();
+    void     begin_();
     uint16_t panelX() const { return MARGIN_X; }
     uint16_t panelY() const;
     uint16_t listTop() const { return panelY() + TITLE_H; }
@@ -91,8 +107,12 @@ private:
     bool     fullRedraw_ = true;
     uint16_t paramId_    = 0;
 
-    // Borrowed from the generated table — static storage, never freed.
-    const JT::Params::ParamDesc* desc_ = nullptr;
+    // What draw() renders. Param mode points these at the generated table's
+    // label and option strings; list mode at the caller's static list. Both are
+    // static storage, never freed — the popup only borrows them.
+    const char*        title_    = nullptr;
+    const char* const* names_    = nullptr;
+    bool               listMode_ = false;
 
     uint8_t count_         = 0;
     uint8_t highlight_     = 0;
