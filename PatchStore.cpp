@@ -8,6 +8,7 @@
 // identical.
 // =============================================================================
 #include "PatchStore.h"
+#include "PatchLegacy252.h"
 
 #include <FFat.h>
 
@@ -105,6 +106,24 @@ bool PatchStore::load(uint8_t slot, float* values, size_t count) {
         f.close();
         return false;
     }
+    // D-10: a 252-parameter file from before the bass sequencer.  Read it
+    // in ITS order and move every value to where its ParamID lives now.
+    if (h.version == kVersion
+        && h.paramCount == JtPatchLegacy::kLegacyCount252
+        && JtPatchLegacy::kLegacyCount252 != JT::Params::kParamCount) {
+        const bool ok = loadLegacy252(f, values, count);
+        f.close();
+        if (ok) {
+            Serial.printf("[PATCH] slot %u: %u-param patch migrated by ParamID\r\n",
+                          static_cast<unsigned>(slot),
+                          static_cast<unsigned>(h.paramCount));
+        } else {
+            Serial.printf("[PATCH] slot %u: legacy patch short read — refused\r\n",
+                          static_cast<unsigned>(slot));
+        }
+        return ok;
+    }
+
     if (h.version != kVersion || h.paramCount != JT::Params::kParamCount) {
         Serial.printf("[PATCH] slot %u: format v%u/%u params, expected v%u/%u — refused\r\n",
                       static_cast<unsigned>(slot),
@@ -128,6 +147,28 @@ bool PatchStore::load(uint8_t slot, float* values, size_t count) {
 
     // The caller (JtParam::Store::loadAll) clamps and NaN-guards each value, so
     // a corrupt file cannot poison the store.
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// D-10 migration: 252-value file -> current table, by ParamID
+// ─────────────────────────────────────────────────────────────────────────────
+bool PatchStore::loadLegacy252(fs::File& f, float* values, size_t count) {
+    // Start from the table defaults: anything the old table did not have
+    // (the bass sequencer, voice.legato) behaves exactly as before.
+    for (size_t i = 0; i < count; ++i) {
+        values[i] = JtParam::defaultNorm(JT::Params::kParams[i]);
+    }
+
+    // Stream the old values one at a time — no second 1 KB buffer — and drop
+    // each onto its ParamID's CURRENT ordinal.  An id that no longer exists
+    // (retired) is simply skipped.
+    for (size_t i = 0; i < JtPatchLegacy::kLegacyCount252; ++i) {
+        float v = 0.0f;
+        if (f.read(reinterpret_cast<uint8_t*>(&v), sizeof v) != sizeof v) return false;
+        const uint16_t ord = JtParam::ordinalOf(JtPatchLegacy::kLegacyIds252[i]);
+        if (ord < count) values[ord] = v;   // loadAll() clamps / NaN-guards later
+    }
     return true;
 }
 

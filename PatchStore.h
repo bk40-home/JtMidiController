@@ -13,6 +13,12 @@
 //
 //   Accepted by Kris: only test patches existed; they will be re-initialised.
 //
+// TABLE GROWTH (ledger D-10, 2026-10-17)
+//   One known older table IS still readable: a 252-parameter file (the table
+//   before the bass sequencer) is loaded BY ParamID through the frozen list in
+//   PatchLegacy252.h.  Parameters it did not have keep their defaults.  The
+//   file is only rewritten (in the current format) when it is saved again.
+//
 // WHY NORMALISED FLOATS AND NOT ENGINEERING UNITS
 //   Because the curve lives in params.yaml. Storing Hz would freeze today's
 //   curve into every saved file, and changing a range in the yaml would then
@@ -28,6 +34,7 @@
 #pragma once
 
 #include <Arduino.h>
+#include <FS.h>          // fs::File, for the legacy-patch reader below
 
 #include "Config.h"
 #include "JtParamModel.h"
@@ -71,6 +78,10 @@ public:
     bool        setPerfName(const char* name);
 
 private:
+    // D-10: read a 252-parameter file body (header already consumed) into the
+    // current table by ParamID.  See PatchLegacy252.h.
+    bool loadLegacy252(fs::File& f, float* values, size_t count);
+
     bool mounted_ = false;
     char names_[Config::MAX_PATCHES][17] = {};
     char perfName_[17] = {};

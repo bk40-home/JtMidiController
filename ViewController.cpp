@@ -6,6 +6,8 @@
 
 #include "HwPalette.h"
 
+#include <math.h>   // NAN (shadow-sync caches), lroundf
+
 using JT::Params::ParamDesc;
 using JT::Params::Type;
 
@@ -25,7 +27,8 @@ bool seqRowSkip(uint16_t id) {
     using namespace JT::Params;
     const bool gridArray =
            (id >= ID::SEQ_STEP_1     && id <= ID::SEQ_AUX_STEP_16)
-        || (id >= ID::ARP_STEP_ON_1  && id <= ID::ARP_STEP_RATCHET_16);
+        || (id >= ID::ARP_STEP_ON_1  && id <= ID::ARP_STEP_RATCHET_16)
+        || (id >= ID::BASS_STEP_1    && id <= ID::BASS_STEP_32);   // bass grid
     const bool retiredCursor =
            id == ID::SEQ_STEP_SELECT     || id == ID::SEQ_STEP_VALUE
         || id == ID::SEQ_AUX_STEP_SELECT || id == ID::SEQ_AUX_STEP_VALUE
@@ -105,6 +108,22 @@ void ViewController::begin(JtParam::CcSink sink, Arduino_GFX* gfx) {
         ordArpOn_     [i] = JtParam::ordinalOf(static_cast<uint16_t>(JT::Params::ID::ARP_STEP_ON_1 + i));
         ordArpRatchet_[i] = JtParam::ordinalOf(static_cast<uint16_t>(JT::Params::ID::ARP_STEP_RATCHET_1 + i));
     }
+    // Bass sequencer: 32 step slots + the generator inputs the shadow mirrors.
+    for (uint8_t i = 0; i < kBassSteps; ++i) {
+        ordBassStep_[i]   = JtParam::ordinalOf(static_cast<uint16_t>(JT::Params::ID::BASS_STEP_1 + i));
+        bassStepCache_[i] = NAN;                 // NaN: "never pushed" — first sync applies all
+    }
+    {
+        namespace ID = JT::Params::ID;
+        const uint16_t ids[kBassInputs] = {
+            ID::BASS_SEED, ID::BASS_MUTATION, ID::BASS_DENSITY, ID::BASS_ACCENT,
+            ID::BASS_SLIDE, ID::BASS_OCTAVE, ID::BASS_RANGE, ID::BASS_LENGTH,
+            ID::BASS_ENABLE };
+        for (uint8_t i = 0; i < kBassInputs; ++i) {
+            ordBassIn_[i]   = JtParam::ordinalOf(ids[i]);
+            bassInCache_[i] = NAN;
+        }
+    }
     ordMasterVol_ = JtParam::ordinalOf(JT::Params::ID::MASTER_VOLUME);
     // Fault 2: perf.mode drives the chip's "B is silent in Single" dim cue.
     ordPerfMode_  = JtParam::ordinalOf(JT::Params::ID::PERF_MODE);
@@ -169,6 +188,11 @@ uint8_t ViewController::currentSection() const {
     const JtNav::Page& pg = JtNav::page(page_);
     // Phase 9: the SEQ page's third flip state (Arp) shows section 17, not the
     // sequencer's section 13 — same page, same grid, different param set.
+    // bass-seq: both bass stops show section 18 (Bass Sequencer).
+    if (pg.kind == JtNav::PageKind::Sequencer
+        && JtView::SeqPanel::isBassLane(seq_.lane())) {
+        return 18;
+    }
     if (pg.kind == JtNav::PageKind::Sequencer
         && seq_.lane() == JtView::SeqPanel::Lane::Arp) {
         // Section 17 == Arpeggiator (params.yaml / regenerated ParamTable
@@ -239,7 +263,28 @@ bool ViewController::refreshRows() {
                 if (aux ? gateOnly : auxOnly) continue;
             }
 
+            // Bass: 18 controls, 12 row slots.  BASS keeps playback + the
+            // generator's identity; BASS GEN keeps the amounts and the 303
+            // voice.  bass.enable is on both, so either stop can switch it.
+            if (JtView::SeqPanel::isBassLane(ln)) {
+                namespace ID = JT::Params::ID;
+                const bool both  = (id == ID::BASS_ENABLE);
+                const bool onGen = (id == ID::BASS_GATE_LENGTH || id == ID::BASS_ACCENT
+                                 || id == ID::BASS_SLIDE       || id == ID::BASS_OCTAVE
+                                 || id == ID::BASS_SLIDE_TIME  || id == ID::BASS_ACCENT_AMP
+                                 || id == ID::BASS_ACCENT_FILTER);
+                const bool genLane = (ln == JtView::SeqPanel::Lane::BassGen);
+                if (!both && (onGen != genLane)) continue;
+            }
+
             filt.ordinal[filt.count++] = fresh.ordinal[i];
+        }
+
+        // The arp lane also offers bass.enable: switching the bass sequencer
+        // on from here REPLACES the arp (commitSelect then jumps to BASS).
+        if (ln == JtView::SeqPanel::Lane::Arp && filt.count < JtNav::kMaxRows) {
+            const uint16_t o = ordBassIn_[kInEnable];
+            if (o != JtParam::kNoOrdinal) filt.ordinal[filt.count++] = o;
         }
 
         // On the arp lane, put back the FOCUSED step's on/off and ratchet as
@@ -399,7 +444,7 @@ void ViewController::advanceActivePageView() {
     // lane colour and the SEL/VAL row mirror stay in step, exactly as the old
     // Sequencer-only handler did.
     if (pg.kind == JtNav::PageKind::Sequencer) {
-        const JtView::SeqPanel::Lane l = seq_.toggleLane();
+        const JtView::SeqPanel::Lane l = seq_.toggleLane(bassActive());
         syncSeqLaneRows(l);
         return;
     }
@@ -627,6 +672,15 @@ void ViewController::render() {
             // Previously the arp lane drew the SEQUENCER's head, which was
             // simply the wrong marker, and showed nothing at all whenever the
             // sequencer happened to be stopped.
+            // Bass stops: the piano-roll grid from the shadow generator.  No
+            // playhead yet — the firmware does not broadcast the bass step
+            // (grid decision 7b), so 0xFF.
+            if (JtView::SeqPanel::isBassLane(seq_.lane())) {
+                if (gfxReady) seq_.drawBass(syncBassShadow(), bassLength(),
+                                            0xFF, seqSelStep_);
+                list_.drawDirty(rows_, store_, rowHw_, focusRow_, maxY, budget);
+                break;
+            }
             const bool arpLane = (seq_.lane() == JtView::SeqPanel::Lane::Arp);
             const bool running = arpLane ? arpRunning_  : seqRunning_;
             const uint8_t head = arpLane ? arpPlayStep_ : playStep_;
@@ -1068,6 +1122,11 @@ void ViewController::handleTouch(const TouchInput& touch) {
                     presetPopupReq_ = static_cast<uint8_t>(
                         JT::PatternPresets::FamilyId::Arp);
                     break;
+                case JtView::SeqPanel::Lane::Bass:
+                case JtView::SeqPanel::Lane::BassGen:
+                    // Bass: the actions list (seed, mutate, freeze, step octave...).
+                    presetPopupReq_ = kBassActionFamily;
+                    break;
                 case JtView::SeqPanel::Lane::Aux:   // not a rhythmic gate
                 default:
                     break;
@@ -1086,6 +1145,12 @@ void ViewController::handleTouch(const TouchInput& touch) {
             // the same value onto a different step used to collide on the one
             // shared slot and get skipped as "unchanged", leaving the bar
             // showing a value the engine had never heard.
+            // Bass stops edit the piano roll instead of bar heights.
+            if (JtView::SeqPanel::isBassLane(seq_.lane())) {
+                handleBassTap(touchStartX_, touchStartY_);
+                touchRow_ = JtView::RowList::kNoRow;
+                return;
+            }
             const uint8_t step = JtView::SeqPanel::stepAt(touchStartX_,
                                                           touchStartY_);
             const float   v    = JtView::SeqPanel::valueFromY(touchStartY_);
@@ -1163,6 +1228,17 @@ void ViewController::commitSelect(uint16_t paramId, uint8_t optionIndex) {
 
     store_.setById(paramId, JtParam::indexToNorm(*d, optionIndex));
 
+    // bass.enable switched On from the ARP stop: the bass sequencer now owns
+    // the keys and replaces the arp, so move the SEQ page to the BASS stop
+    // (the same flip the plugin's ARP page does).
+    if (paramId == JT::Params::ID::BASS_ENABLE && optionIndex >= 1u
+        && JtNav::page(page_).kind == JtNav::PageKind::Sequencer
+        && seq_.lane() == JtView::SeqPanel::Lane::Arp) {
+        seq_.setLane(JtView::SeqPanel::Lane::Bass);
+        syncSeqLaneRows(seq_.lane());
+        return;
+    }
+
     // A select may be a visible_when dependency (filter engine, osc wave), so
     // the row set can change the instant this commits.
     if (refreshRows()) invalidateContent();
@@ -1181,4 +1257,205 @@ bool ViewController::handleInboundCC(uint8_t cc, uint8_t value) {
         if (refreshRows()) invalidateContent();
     }
     return consumed;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Bass sequencer (bass-seq ESP32 delivery)
+//
+// The grid shows the RESOLVED pattern — generated steps plus hand edits — from
+// a shadow of the firmware's own generator (BassPattern.cpp, copied verbatim).
+// It is deterministic, so fed with the same store values it produces exactly
+// the steps the engine plays.  Every edit is an ordinary bass.step_n write:
+// saved with the patch, sent as 14-bit NRPN by flushDirty().
+// ─────────────────────────────────────────────────────────────────────────────
+
+const char* const ViewController::kBassActionNames[kBassActionCount] = {
+    "NEW SEED",     // 0  random seed, mutation -> 0
+    "MUTATE",       // 1  mutation + 1 (~25% of steps re-rolled)
+    "UNDO",         // 2  previous (seed, mutation), one level
+    "FREEZE",       // 3  copy the generated pattern into hand edits
+    "CLEAR",        // 4  every step a hand-edited rest (blank canvas)
+    "REVERT",       // 5  every step back to the generator
+    "STEP OCT +1",  // 6  focused step
+    "STEP OCT 0",   // 7
+    "STEP OCT -1",  // 8
+    "STEP -> GEN",  // 9  focused step back to the generator
+};
+
+bool ViewController::bassActive() const {
+    const uint16_t o = ordBassIn_[kInEnable];
+    const ParamDesc* d = JtParam::descAt(o);
+    return d && JtParam::normToIndex(*d, store_.get(o)) >= 1u;   // on_off: 1 = On
+}
+
+uint8_t ViewController::bassLength() const {
+    int n = readBassInt(kInLength);
+    if (n < 1) n = 1;
+    if (n > kBassSteps) n = kBassSteps;
+    return static_cast<uint8_t>(n);
+}
+
+int ViewController::readBassInt(uint8_t input) const {
+    const uint16_t o = ordBassIn_[input];
+    const ParamDesc* d = JtParam::descAt(o);
+    return d ? static_cast<int>(lroundf(JtParam::toEng(*d, store_.get(o)))) : 0;
+}
+
+void ViewController::writeBassInt(uint8_t input, int value) {
+    const uint16_t o = ordBassIn_[input];
+    const ParamDesc* d = JtParam::descAt(o);
+    if (d) store_.set(o, JtParam::toNorm(*d, static_cast<float>(value)));
+}
+
+void ViewController::writeBassStep(uint8_t step, uint16_t packed) {
+    if (step >= kBassSteps) return;
+    const uint16_t o = ordBassStep_[step];
+    const ParamDesc* d = JtParam::descAt(o);
+    // Int 0..2047: the store's float carries it exactly and the NRPN sender
+    // rounds to 14 bits, which the firmware maps back to the same integer.
+    if (d) store_.set(o, JtParam::toNorm(*d, static_cast<float>(packed)));
+}
+
+// Store -> shadow, touching ONLY what changed since the last call (a float
+// compare per input; NaN caches force the first push).  Called from the bass
+// draw and the tap path, so it costs nothing on other pages.
+const uint16_t* ViewController::syncBassShadow() {
+    for (uint8_t i = 0; i < kBassInputs; ++i) {
+        const uint16_t o = ordBassIn_[i];
+        const float    t = store_.get(o);
+        if (t == bassInCache_[i]) continue;
+        bassInCache_[i] = t;
+        const ParamDesc* d = JtParam::descAt(o);
+        if (!d) continue;
+        const float eng = JtParam::toEng(*d, t);
+        const int   iv  = static_cast<int>(lroundf(eng));
+        switch (static_cast<BassIn>(i)) {
+            case kInSeed:     bassPat_.setSeed(static_cast<uint16_t>(iv < 0 ? 0 : iv)); break;
+            case kInMutation: bassPat_.setMutation(static_cast<uint16_t>(iv < 0 ? 0 : iv)); break;
+            case kInDensity:  bassPat_.setDensity(eng);       break;
+            case kInAccent:   bassPat_.setAccentAmount(eng);  break;
+            case kInSlide:    bassPat_.setSlideAmount(eng);   break;
+            case kInOctave:   bassPat_.setOctaveAmount(eng);  break;
+            case kInRange:    bassPat_.setRange(iv);          break;
+            case kInLength:   bassPat_.setLength(iv);         break;
+            case kInEnable:   default:                        break;   // display only
+        }
+    }
+    for (uint8_t k = 0; k < kBassSteps; ++k) {
+        const uint16_t o = ordBassStep_[k];
+        const float    t = store_.get(o);
+        if (t == bassStepCache_[k]) continue;
+        bassStepCache_[k] = t;
+        const ParamDesc* d = JtParam::descAt(o);
+        if (!d) continue;
+        const long v = lroundf(JtParam::toEng(*d, t));
+        bassPat_.setStepPacked(k, static_cast<uint16_t>(v < 0 ? 0 : v));
+    }
+    return bassPat_.resolved();          // lazily re-resolves only if dirty
+}
+
+// Tap on the bass grid (standing spec: TAP, not drag).  The tapped COLUMN is
+// the step, the tapped ROW is the scale degree:
+//   rest                  -> a note at the tapped degree (octave 0)
+//   note, different row   -> move it to the tapped degree
+//   note, same row        -> cycle  note -> accent -> slide -> accent+slide -> rest
+// Every edit is a hand edit (USER bit), so the generator leaves it alone.
+void ViewController::handleBassTap(int16_t x, int16_t y) {
+    using JT::BassPattern;
+    const uint8_t len  = bassLength();
+    const uint8_t step = JtView::SeqPanel::bassStepAt(x, y, len);
+    if (step == 0xFF) return;
+    const uint8_t row = JtView::SeqPanel::bassRowAt(y);
+
+    uint16_t s = syncBassShadow()[step];
+    const bool  gated = (s & BassPattern::kGateBit) != 0;
+    const uint8_t deg = static_cast<uint8_t>(s & BassPattern::kDegreeMask);
+
+    if (!gated) {
+        s = static_cast<uint16_t>(
+              (s & ~(BassPattern::kDegreeMask | BassPattern::kAccentBit
+                     | BassPattern::kSlideBit | BassPattern::kOctMask))
+            | row | BassPattern::kGateBit | (1u << BassPattern::kOctShift));
+    } else if (deg != row) {
+        s = static_cast<uint16_t>((s & ~BassPattern::kDegreeMask) | row);
+    } else {
+        const uint8_t cur = static_cast<uint8_t>(((s & BassPattern::kAccentBit) ? 1u : 0u)
+                                               | ((s & BassPattern::kSlideBit)  ? 2u : 0u));
+        if (cur == 3u) {
+            s = static_cast<uint16_t>(s & ~(BassPattern::kGateBit | BassPattern::kAccentBit
+                                            | BassPattern::kSlideBit));     // -> rest
+        } else {
+            const uint8_t nxt = static_cast<uint8_t>(cur + 1u);
+            s = static_cast<uint16_t>((s & ~(BassPattern::kAccentBit | BassPattern::kSlideBit))
+                                      | ((nxt & 1u) ? BassPattern::kAccentBit : 0u)
+                                      | ((nxt & 2u) ? BassPattern::kSlideBit  : 0u));
+        }
+    }
+    writeBassStep(step, static_cast<uint16_t>(s | BassPattern::kUserBit));
+    seqSelStep_ = step;                   // focus follows the tap (outline)
+}
+
+void ViewController::applyBassAction(uint8_t index) {
+    using JT::BassPattern;
+    const uint8_t len = bassLength();
+
+    switch (index) {
+        case 0: {   // NEW SEED
+            bassUndoSeed_ = static_cast<int16_t>(readBassInt(kInSeed));
+            bassUndoMut_  = static_cast<int16_t>(readBassInt(kInMutation));
+            // random() on the ESP32 core draws from the hardware RNG.
+            int seed = static_cast<int>(random(BassPattern::kSeedMax + 1L));
+            if (seed == bassUndoSeed_) seed = (seed + 1) & BassPattern::kSeedMax;
+            writeBassInt(kInMutation, 0);            // a new seed starts clean
+            writeBassInt(kInSeed, seed);
+            break;
+        }
+        case 1: {   // MUTATE
+            const int m = readBassInt(kInMutation);
+            if (m >= BassPattern::kMaxMutation) break;   // ceiling: keep undo
+            bassUndoSeed_ = static_cast<int16_t>(readBassInt(kInSeed));
+            bassUndoMut_  = static_cast<int16_t>(m);
+            writeBassInt(kInMutation, m + 1);
+            break;
+        }
+        case 2:     // UNDO (one level)
+            if (bassUndoSeed_ >= 0) {
+                writeBassInt(kInSeed, bassUndoSeed_);
+                writeBassInt(kInMutation, bassUndoMut_);
+                bassUndoSeed_ = bassUndoMut_ = -1;
+            }
+            break;
+        case 3: {   // FREEZE: the resolved pattern becomes hand edits
+            uint16_t snap[kBassSteps];
+            const uint16_t* res = syncBassShadow();
+            for (uint8_t i = 0; i < kBassSteps; ++i) snap[i] = res[i];
+            for (uint8_t i = 0; i < kBassSteps; ++i)
+                writeBassStep(i, static_cast<uint16_t>(snap[i] | BassPattern::kUserBit));
+            break;
+        }
+        case 4:     // CLEAR: hand-edited rests, octave field 1 (= no jump)
+            for (uint8_t i = 0; i < kBassSteps; ++i)
+                writeBassStep(i, static_cast<uint16_t>(BassPattern::kUserBit
+                                                       | (1u << BassPattern::kOctShift)));
+            break;
+        case 5:     // REVERT: all steps back to the generator
+            for (uint8_t i = 0; i < kBassSteps; ++i) writeBassStep(i, 0);
+            break;
+        case 6: case 7: case 8: {   // focused step octave +1 / 0 / -1
+            if (seqSelStep_ >= len) break;
+            uint16_t s = syncBassShadow()[seqSelStep_];
+            if (!(s & BassPattern::kGateBit)) break;  // a rest has no octave to show
+            const uint16_t field = (index == 6) ? 2u : (index == 7) ? 1u : 0u;
+            s = static_cast<uint16_t>((s & ~BassPattern::kOctMask)
+                                      | (field << BassPattern::kOctShift)
+                                      | BassPattern::kUserBit);
+            writeBassStep(seqSelStep_, s);
+            break;
+        }
+        case 9:     // focused step -> generator
+            if (seqSelStep_ < len) writeBassStep(seqSelStep_, 0);
+            break;
+        default:
+            break;
+    }
 }

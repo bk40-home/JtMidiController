@@ -131,10 +131,13 @@ static void modalDrainEncoders(Encoder8Unit& e) {
 // owner's close-repair either way.
 static void commitPopup() {
     if (selectPopup.isListMode()) {
-        view.applyPatternPreset(
-            static_cast<uint8_t>(selectPopup.resultParamId()
-                                 - SelectPopup::kListTagBase),
-            selectPopup.resultIndex());
+        const uint8_t family = static_cast<uint8_t>(selectPopup.resultParamId()
+                                                    - SelectPopup::kListTagBase);
+        if (family == ViewController::kBassActionFamily) {
+            view.applyBassAction(selectPopup.resultIndex());    // bass lane menu
+        } else {
+            view.applyPatternPreset(family, selectPopup.resultIndex());
+        }
     } else {
         view.commitSelect(selectPopup.resultParamId(),
                           selectPopup.resultIndex());
@@ -442,11 +445,19 @@ void loop() {
         // path knows which table the chosen index belongs to.
         uint8_t presetFamily = 0;
         if (view.takePresetPopupRequest(presetFamily)) {
-            const JT::PatternPresets::Family& fam = JT::PatternPresets::family(
-                static_cast<JT::PatternPresets::FamilyId>(presetFamily));
-            selectPopup.openList(
-                static_cast<uint16_t>(SelectPopup::kListTagBase + presetFamily),
-                fam.label, fam.names, fam.count, 0);
+            if (presetFamily == ViewController::kBassActionFamily) {
+                // Bass lanes: the action menu (seed / mutate / freeze / step octave).
+                selectPopup.openList(
+                    static_cast<uint16_t>(SelectPopup::kListTagBase + presetFamily),
+                    "BASS", ViewController::kBassActionNames,
+                    ViewController::kBassActionCount, 0);
+            } else {
+                const JT::PatternPresets::Family& fam = JT::PatternPresets::family(
+                    static_cast<JT::PatternPresets::FamilyId>(presetFamily));
+                selectPopup.openList(
+                    static_cast<uint16_t>(SelectPopup::kListTagBase + presetFamily),
+                    fam.label, fam.names, fam.count, 0);
+            }
             touch.clearTap();   // same latch discard as the select popup above
         }
 

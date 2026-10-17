@@ -41,6 +41,7 @@
 #include "ByteButtonUnit.h"
 #include "TouchInput.h"
 #include "HomePanel.h"
+#include "BassPattern.h"     // shadow generator for the bass grid (verbatim copy)
 
 class ViewController {
 public:
@@ -122,6 +123,15 @@ public:
     // Writes go through the store, so the next flushDirty() sends only the
     // parameters that changed, addressed to the current edit layer.
     void     applyPatternPreset(uint8_t family, uint8_t index);
+
+    // ---- Bass sequencer actions (long-press on the bass grid) --------------
+    // The popup reuses the pattern-preset LIST mode: a long-press on a bass
+    // lane parks kBassActionFamily as the "family", the .ino opens the list
+    // below, and the chosen index comes back through applyBassAction().
+    static constexpr uint8_t kBassActionFamily = 0xF0;   // outside preset families
+    static constexpr uint8_t kBassActionCount  = 10;
+    static const char* const kBassActionNames[kBassActionCount];
+    void     applyBassAction(uint8_t index);
 
     JtParam::Store&       store()       { return store_; }
     const JtParam::Store& store() const { return store_; }
@@ -321,6 +331,35 @@ private:
     // and ratchet for the FOCUSED step only, so moving the focus changes the
     // visible row set and the list has to be rebuilt.
     uint8_t  lastArpRowStep_ = 0xFF;
+
+    // ---- Bass sequencer (bass-seq ESP32 delivery) --------------------------
+    // The grid draws the RESOLVED pattern from a SHADOW of the firmware's own
+    // generator (BassPattern.cpp, copied verbatim), fed from the store — the
+    // same steps the engine plays, with no wire traffic.
+    static constexpr uint8_t kBassSteps = JtView::SeqPanel::kBassMaxSteps;
+    JT::BassPattern bassPat_;
+    uint16_t ordBassStep_[kBassSteps];          // bass.step_1..32
+    // Generator inputs mirrored into the shadow, in this fixed order:
+    //   seed, mutation, density, accent, slide, octave, range, length, enable
+    static constexpr uint8_t kBassInputs = 9;
+    enum BassIn : uint8_t { kInSeed = 0, kInMutation, kInDensity, kInAccent,
+                            kInSlide, kInOctave, kInRange, kInLength, kInEnable };
+    uint16_t ordBassIn_[kBassInputs];
+    // Last value pushed into the shadow, per input and per step (NaN = never),
+    // so syncBassShadow() only touches what changed.
+    float    bassInCache_[kBassInputs];
+    float    bassStepCache_[kBassSteps];
+    // One-level undo for NEW SEED / MUTATE (the store holds the live values).
+    int16_t  bassUndoSeed_ = -1;
+    int16_t  bassUndoMut_  = -1;
+
+    bool            bassActive() const;          // bass.enable == On
+    uint8_t         bassLength() const;          // bass.length, 1..32
+    const uint16_t* syncBassShadow();            // store -> shadow; resolved steps
+    void            writeBassStep(uint8_t step, uint16_t packed);
+    void            writeBassInt(uint8_t input, int value);
+    int             readBassInt(uint8_t input) const;
+    void            handleBassTap(int16_t x, int16_t y);
 
     // The 16 ordinals for whichever lane is showing, and the parameter that
     // says how many of them are played.

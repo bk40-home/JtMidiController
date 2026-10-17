@@ -42,7 +42,19 @@ public:
     // own button cycles Gate -> Aux -> Arp -> Gate.  Clock, playhead, focus and
     // step count are shared; switching only swaps which 16-value cache the grid
     // reads and which accent colour it draws.
-    enum class Lane : uint8_t { Gate = 0, Aux = 1, Arp = 2 };
+    //
+    // Bass (bass-seq): TWO more stops share the grid area but draw the bass
+    // pattern as a piano roll instead of bars.  Two stops because the bass
+    // section has 18 controls and a graphical page shows 12 rows: BASS holds
+    // the playback + generator rows, BASS GEN the amounts and the 303 voice.
+    // The grid is the same on both.
+    enum class Lane : uint8_t { Gate = 0, Aux = 1, Arp = 2, Bass = 3, BassGen = 4 };
+    static bool isBassLane(Lane l) { return l == Lane::Bass || l == Lane::BassGen; }
+
+    // Bass pattern grid geometry.
+    static constexpr uint8_t kBassMaxSteps = 32;   // == BassPattern::kMaxSteps
+    static constexpr uint8_t kBassRows     = 16;   // scale degrees 0..15
+    static constexpr int16_t kBassRowH     = 7;    // 16 x 7 = 112 of kGridH
 
     void begin(Arduino_GFX* gfx) { gfx_ = gfx; invalidate(); }
     void invalidate() { dirty_ = true; }
@@ -51,10 +63,14 @@ public:
     // both change).  Returns the lane after toggling, for LED/label sync.
     void  setLane(Lane l) { if (l != lane_) { lane_ = l; invalidate(); } }
     Lane  lane() const { return lane_; }
-    // Cycle Gate -> Aux -> Arp -> Gate.  Returns the new lane for LED/label sync.
-    Lane  toggleLane()
+    // Cycle Gate -> Aux -> Arp -> Bass -> BassGen -> Gate.  While the bass
+    // sequencer is ON it REPLACES the arp (decision 4a, same as the plugin's
+    // page flip), so the Arp stop is skipped; the bass stops always remain
+    // because they carry bass.enable.  Returns the new lane for LED/label sync.
+    Lane  toggleLane(bool bassActive)
     {
-        const uint8_t n = (static_cast<uint8_t>(lane_) + 1u) % 3u;
+        uint8_t n = static_cast<uint8_t>((static_cast<uint8_t>(lane_) + 1u) % 5u);
+        if (bassActive && n == static_cast<uint8_t>(Lane::Arp)) n = static_cast<uint8_t>(Lane::Bass);
         setLane(static_cast<Lane>(n));
         return lane_;
     }
@@ -73,6 +89,18 @@ public:
 
     // Which step is under this touch point, or 0xFF.
     static uint8_t stepAt(int16_t x, int16_t y);
+
+    // ---- Bass pattern grid --------------------------------------------------
+    // Draw the RESOLVED bass pattern (generated + hand edits), `length` columns
+    // across the grid width.  Packed format == BassPattern.h.  Change-driven:
+    // only columns whose step (or whose tie into the next step) changed are
+    // repainted.  playHead 0xFF = none (the firmware does not broadcast the bass
+    // playhead yet — grid decision 7b).
+    void drawBass(const uint16_t* packed32, uint8_t length,
+                  uint8_t playHead, uint8_t focusStep);
+    // Hit tests for the bass grid: step column (0xFF outside) and degree row.
+    static uint8_t bassStepAt(int16_t x, int16_t y, uint8_t length);
+    static uint8_t bassRowAt(int16_t y);
 
     // Tap-grid entry (standing spec: TAP, not drag): the tapped HEIGHT is the
     // step value. Exact inverse of the bar drawing — bottom edge 0.0, top
@@ -103,6 +131,14 @@ private:
 
     void drawBar(uint8_t i, float v, uint8_t activeCount,
                  bool isHead, bool isFocus);
+
+    // Bass grid redraw filter: per column, the packed step plus "next step is
+    // a note" in bit 15 (a tie is drawn only into a note, so a neighbour's
+    // change can alter this column).
+    uint16_t bassLast_[kBassMaxSteps] = {};
+    uint8_t  bassLastLen_ = 0;
+    void drawBassColumn(uint8_t i, uint16_t packed, bool nextGated,
+                        uint8_t length, bool isHead, bool isFocus);
 };
 
 } // namespace JtView
