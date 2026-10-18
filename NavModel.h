@@ -15,7 +15,7 @@
 //     FILT   (graphical: response curve)
 //     ENV    Amp / Filter / Pitch / ALL   (graphical: curve + 3-way overlay)
 //     LFO    LFO 1 / LFO 2
-//     FX     Effects / Reverb
+//     FX     Effects / Delay / Reverb
 //     SEQ    (graphical: step grid)
 //     VOICE  Voice Mode / Velocity
 //     PERF   Performance / Clock / Master
@@ -56,9 +56,29 @@ enum class PageKind : uint8_t {
     Home         // scope, voice dots, master volume — the one place bars belong
 };
 
+// ── Group masks ──────────────────────────────────────────────────────────────
+// Every parameter carries a `group` (0..kMaxGroups-1) inside its section, and
+// params.yaml names those groups (ParamTable.h kGroupNames). A sub-tab may show
+// only some groups of a section: bit g set = group g is shown.
+//
+// Why: section 9 "Effects" holds EQ, drive, modulation, delay, tape echo and
+// output — up to 20 rows, more than one list page holds (kMaxRows = 18). Two
+// sub-tabs of the same section, each taking some of its groups, split it
+// without touching params.yaml, the firmware, JUCE or saved patches.
+//
+// All bits set = every group, so a sub-tab that does not name a mask behaves
+// exactly as before this change (see the default below).
+static constexpr uint8_t kAllGroups = 0xFF;
+
+constexpr uint8_t groupBit(uint8_t g) { return static_cast<uint8_t>(1u << g); }
+
+// 8 bits in the mask; the generator caps groups per section at kMaxGroups.
+static_assert(JT::Params::kMaxGroups <= 8, "group mask is 8 bits wide");
+
 struct SubTab {
     const char* name;
-    uint8_t     section;      // index into JT::Params::kSectionNames
+    uint8_t     section;                 // index into JT::Params::kSectionNames
+    uint8_t     groupMask = kAllGroups;  // which of the section's groups to show
 };
 
 struct Page {
@@ -81,14 +101,18 @@ const Page& page(uint8_t idx);
 bool isVisible(const JT::Params::ParamDesc& d, const JtParam::Store& store);
 
 // ── The rows of one sub-tab, after visibility filtering ──────────────────────
-static constexpr uint8_t kMaxRows = 18;   // worst list sub-tab is 14 (Effects)
+// 18 = 2 columns x 9 rows of the list layout (RowList kRowsPerCol). Effects
+// used to reach 20 with the tape engine and silently lost its last two rows
+// (DLY FLUT, DLY WOWR); it is now split across EFFECTS and DELAY.
+static constexpr uint8_t kMaxRows = 18;
 
 struct RowSet {
     uint16_t ordinal[kMaxRows];
     uint8_t  count;
 };
 
-// Collect the visible rows of `section`, in table order.
+// Collect the visible rows of `section`, in table order, keeping only the
+// groups set in `groupMask` (kAllGroups = all of them).
 //
 // `skip` (optional) drops a parameter by ID BEFORE the kMaxRows cap is
 // applied. That ordering matters: the sequencer and arp sections carry 32 and
@@ -96,8 +120,11 @@ struct RowSet {
 // they outnumber kMaxRows on their own. Filtering after the cap would work
 // only because the generator appends — i.e. by luck about table order — and
 // would silently truncate real rows the day anything is inserted.
+//
+// The group test also runs before the cap, for the same reason: rows of a
+// group this tab does not show must not use up row slots.
 using RowSkipFn = bool (*)(uint16_t id);
 void collectRows(uint8_t section, const JtParam::Store& store, RowSet& out,
-                 RowSkipFn skip = nullptr);
+                 RowSkipFn skip = nullptr, uint8_t groupMask = kAllGroups);
 
 } // namespace JtNav

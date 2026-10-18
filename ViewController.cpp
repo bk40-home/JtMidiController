@@ -204,6 +204,17 @@ uint8_t ViewController::currentSection() const {
     return pg.subs[s].section;
 }
 
+uint8_t ViewController::currentGroupMask() const {
+    const JtNav::Page& pg = JtNav::page(page_);
+    // The SEQ page swaps sections by lane (see currentSection) and filters its
+    // rows itself, so it always takes every group. The ENV overlay has no rows.
+    if (isOverlayTab() || pg.kind == JtNav::PageKind::Sequencer) {
+        return JtNav::kAllGroups;
+    }
+    const uint8_t s = (sub_ < pg.subCount) ? sub_ : 0;
+    return pg.subs[s].groupMask;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Rows
 //
@@ -230,7 +241,8 @@ bool ViewController::refreshRows() {
         fresh.count = 0;            // ENV overlay: no rows, just three curves
     } else {
         JtNav::collectRows(sec, store_, fresh,
-                           (k == JtNav::PageKind::Sequencer) ? &seqRowSkip : nullptr);
+                           (k == JtNav::PageKind::Sequencer) ? &seqRowSkip : nullptr,
+                           currentGroupMask());
     }
 
     // Sequencer lane filter (Stage B/C/D): the SEQ page hosts two lanes on one

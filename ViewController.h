@@ -212,6 +212,10 @@ public:
     // shows all three at once and therefore has no single section).
     uint8_t currentSection() const;
 
+    // Which groups of currentSection() the current tab shows (JtNav::kAllGroups
+    // unless the tab splits its section, e.g. FX EFFECTS / DELAY).
+    uint8_t currentGroupMask() const;
+
 private:
     JtParam::Store    store_;
     JtParam::Emitter  nrpn_;
