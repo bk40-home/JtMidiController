@@ -1,5 +1,5 @@
 // =============================================================================
-// PatchStore.cpp — see PatchStore.h for the v2 format and its rationale.
+// PatchStore.cpp — see PatchStore.h for the v3/v2 formats and their rationale.
 // =============================================================================
 // Uses FFat (FAT filesystem), NOT LittleFS. The board's partition scheme is
 // app3M_fat9M_16MB, whose data partition is subtype FAT; LittleFS.begin() looks
@@ -8,13 +8,18 @@
 // identical.
 // =============================================================================
 #include "PatchStore.h"
-#include "PatchLegacy252.h"
+#include "PatchLegacyIds.h"     // frozen ID lists for 250/252/303/304
 
 #include <FFat.h>
 
 static const char* kPatchDir  = "/patches";
 static const char* kIndexPath = "/patches/index.txt";
 static const char* kPerfPath  = "/patches/perf.txt";
+
+// Records are moved through a small stack buffer: one FFat call per 32
+// records instead of one per parameter (305 tiny writes -> 10), without a
+// 2.4 KB heap or static buffer.  256 bytes of stack, control-plane only.
+static constexpr size_t kRecChunk = 32;
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -58,15 +63,26 @@ bool PatchStore::save(uint8_t slot, const float* values, size_t count,
         return false;
     }
 
+    // v3: header, then one {ParamID, 0, value} Record per param in table
+    // order.  Table order is not required by the reader, but it lets load()
+    // resolve every ordinal with one compare (see loadV3) on the usual case.
     const Header h = {
         kMagic, kVersion,
         static_cast<uint16_t>(JT::Params::kParamCount)
     };
 
     bool ok = (f.write(reinterpret_cast<const uint8_t*>(&h), sizeof h) == sizeof h);
-    if (ok) {
-        const size_t bytes = count * sizeof(float);
-        ok = (f.write(reinterpret_cast<const uint8_t*>(values), bytes) == bytes);
+
+    Record buf[kRecChunk];
+    for (size_t base = 0; ok && base < count; base += kRecChunk) {
+        const size_t n = (count - base < kRecChunk) ? (count - base) : kRecChunk;
+        for (size_t k = 0; k < n; ++k) {
+            buf[k].id       = JT::Params::kParams[base + k].id;
+            buf[k].reserved = 0;
+            buf[k].norm     = values[base + k];
+        }
+        const size_t bytes = n * sizeof(Record);
+        ok = (f.write(reinterpret_cast<const uint8_t*>(buf), bytes) == bytes);
     }
     f.close();
 
@@ -106,12 +122,48 @@ bool PatchStore::load(uint8_t slot, float* values, size_t count) {
         f.close();
         return false;
     }
-    // D-10: a 252-parameter file from before the bass sequencer.  Read it
-    // in ITS order and move every value to where its ParamID lives now.
-    if (h.version == kVersion
-        && h.paramCount == JtPatchLegacy::kLegacyCount252
-        && JtPatchLegacy::kLegacyCount252 != JT::Params::kParamCount) {
-        const bool ok = loadLegacy252(f, values, count);
+    // v3 (current): self-describing records, any table, any order.
+    if (h.version == kVersion) {
+        if (h.paramCount == 0 || h.paramCount > kMaxRecords) {
+            Serial.printf("[PATCH] slot %u: v3 record count %u out of range — refused\r\n",
+                          static_cast<unsigned>(slot),
+                          static_cast<unsigned>(h.paramCount));
+            f.close();
+            return false;
+        }
+        size_t matched = 0, unknown = 0;
+        const bool ok = loadV3(f, h.paramCount, values, count, matched, unknown);
+        f.close();
+        if (!ok) {
+            Serial.printf("[PATCH] slot %u: v3 short read — refused\r\n",
+                          static_cast<unsigned>(slot));
+            return false;
+        }
+        // Silent on the normal case (same table): log only when the file and
+        // the running table disagree, which is exactly when it is worth knowing.
+        if (unknown != 0 || matched != count) {
+            Serial.printf("[PATCH] slot %u: v3 loaded by ParamID — %u matched, "
+                          "%u unknown skipped, %u defaulted\r\n",
+                          static_cast<unsigned>(slot),
+                          static_cast<unsigned>(matched),
+                          static_cast<unsigned>(unknown),
+                          // A corrupt file may repeat an ID; never underflow.
+                          static_cast<unsigned>(matched >= count ? 0 : count - matched));
+        }
+        return true;
+    }
+
+    // ---- v2 (read-only from here down) -------------------------------------
+    // D-10: a v2 file from an OLDER table (250/252/303/304 params).  Read it in
+    // ITS order and move every value to where its ParamID lives now.  The
+    // count check against the running table keeps a current-count v2 file on
+    // the direct path below even if its count also appears in the list.
+    const JtPatchLegacy::LegacyTable* legacy =
+        (h.version == kVersionV2 && h.paramCount != JT::Params::kParamCount)
+            ? JtPatchLegacy::findLegacyTable(h.paramCount)
+            : nullptr;
+    if (legacy) {
+        const bool ok = loadLegacy(f, legacy->ids, legacy->count, values, count);
         f.close();
         if (ok) {
             Serial.printf("[PATCH] slot %u: %u-param patch migrated by ParamID\r\n",
@@ -124,12 +176,13 @@ bool PatchStore::load(uint8_t slot, float* values, size_t count) {
         return ok;
     }
 
-    if (h.version != kVersion || h.paramCount != JT::Params::kParamCount) {
-        Serial.printf("[PATCH] slot %u: format v%u/%u params, expected v%u/%u — refused\r\n",
+    if (h.version != kVersionV2 || h.paramCount != JT::Params::kParamCount) {
+        Serial.printf("[PATCH] slot %u: format v%u/%u params, expected v%u, or v%u/%u — refused\r\n",
                       static_cast<unsigned>(slot),
                       static_cast<unsigned>(h.version),
                       static_cast<unsigned>(h.paramCount),
                       static_cast<unsigned>(kVersion),
+                      static_cast<unsigned>(kVersionV2),
                       static_cast<unsigned>(JT::Params::kParamCount));
         f.close();
         return false;
@@ -151,11 +204,56 @@ bool PatchStore::load(uint8_t slot, float* values, size_t count) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// D-10 migration: 252-value file -> current table, by ParamID
+// v3 reader: {ParamID, reserved, value} records -> current table, by ParamID
 // ─────────────────────────────────────────────────────────────────────────────
-bool PatchStore::loadLegacy252(fs::File& f, float* values, size_t count) {
+bool PatchStore::loadV3(fs::File& f, uint16_t recordCount, float* values, size_t count,
+                        size_t& matched, size_t& unknown) {
+    // Defaults first: any param the file does not mention (added to the table
+    // after the patch was saved) keeps its default — the sound the file had.
+    for (size_t i = 0; i < count; ++i) {
+        values[i] = JtParam::defaultNorm(JT::Params::kParams[i]);
+    }
+
+    matched = 0;
+    unknown = 0;
+    Record buf[kRecChunk];
+    for (size_t base = 0; base < recordCount; base += kRecChunk) {
+        const size_t n = (recordCount - base < kRecChunk) ? (recordCount - base) : kRecChunk;
+        const size_t bytes = n * sizeof(Record);
+        if (f.read(reinterpret_cast<uint8_t*>(buf), bytes) != bytes) return false;
+
+        for (size_t k = 0; k < n; ++k) {
+            const size_t   idx = base + k;      // position in the FILE
+            const uint16_t id  = buf[k].id;
+            // Fast path: save() writes in table order, so with an unchanged
+            // table record idx IS ordinal idx — one compare, no search.
+            // Only after a table change does it fall back to ordinalOf()'s
+            // linear scan (O(n), still well under 1 ms for a whole patch).
+            const uint16_t ord = (idx < count && JT::Params::kParams[idx].id == id)
+                               ? static_cast<uint16_t>(idx)
+                               : JtParam::ordinalOf(id);
+            if (ord < count) {
+                values[ord] = buf[k].norm;      // loadAll() clamps / NaN-guards later
+                ++matched;
+            } else {
+                ++unknown;                      // newer-table or retired ID
+            }
+        }
+    }
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// D-10 migration: older-table v2 file -> current table, by ParamID
+// ─────────────────────────────────────────────────────────────────────────────
+bool PatchStore::loadLegacy(fs::File& f, const uint16_t* oldIds, size_t oldCount,
+                            float* values, size_t count) {
     // Start from the table defaults: anything the old table did not have
-    // (the bass sequencer, voice.legato) behaves exactly as before.
+    // (bass sequencer, voice.legato, mix.xmod_type, master.usb_return_level)
+    // takes its default, which is the behaviour that file was saved with.
+    // NOTE: values[] is overwritten even if the read later fails; load()'s
+    // "untouched on failure" promise is relaxed for legacy files exactly as
+    // it was for the 252 reader (the caller only applies it on success).
     for (size_t i = 0; i < count; ++i) {
         values[i] = JtParam::defaultNorm(JT::Params::kParams[i]);
     }
@@ -163,10 +261,10 @@ bool PatchStore::loadLegacy252(fs::File& f, float* values, size_t count) {
     // Stream the old values one at a time — no second 1 KB buffer — and drop
     // each onto its ParamID's CURRENT ordinal.  An id that no longer exists
     // (retired) is simply skipped.
-    for (size_t i = 0; i < JtPatchLegacy::kLegacyCount252; ++i) {
+    for (size_t i = 0; i < oldCount; ++i) {
         float v = 0.0f;
         if (f.read(reinterpret_cast<uint8_t*>(&v), sizeof v) != sizeof v) return false;
-        const uint16_t ord = JtParam::ordinalOf(JtPatchLegacy::kLegacyIds252[i]);
+        const uint16_t ord = JtParam::ordinalOf(oldIds[i]);
         if (ord < count) values[ord] = v;   // loadAll() clamps / NaN-guards later
     }
     return true;

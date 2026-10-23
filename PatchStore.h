@@ -1,5 +1,5 @@
 // =============================================================================
-// PatchStore.h — patch storage on ESP32 flash via FFat (Phase D, format v2)
+// PatchStore.h — patch storage on ESP32 flash via FFat (format v3, reads v2)
 // =============================================================================
 // FORMAT CHANGE — v1 PATCHES WILL NOT LOAD
 //   v1 stored a raw CC_STATE_SIZE byte dump, indexed by 7-bit CC number. That
@@ -13,11 +13,31 @@
 //
 //   Accepted by Kris: only test patches existed; they will be re-initialised.
 //
-// TABLE GROWTH (ledger D-10, 2026-10-17)
-//   One known older table IS still readable: a 252-parameter file (the table
-//   before the bass sequencer) is loaded BY ParamID through the frozen list in
-//   PatchLegacy252.h.  Parameters it did not have keep their defaults.  The
-//   file is only rewritten (in the current format) when it is saved again.
+// FORMAT v3 (2026-10-22) — SELF-DESCRIBING, WRITTEN BY save()
+//   Same 8-byte header (magic, version = 3, recordCount), then one 8-byte
+//   Record per parameter: { ParamID, reserved (0), normalised value }.
+//   Because every value carries its own ParamID, a table change (params
+//   added, removed or reordered) no longer breaks saved patches and no longer
+//   needs a frozen ID list: load() starts from the table defaults and drops
+//   each record onto wherever its ParamID lives now.  Unknown IDs (from a
+//   NEWER table, or retired) are skipped and counted in the log.
+//   Cost: 8 bytes/param instead of 4 (305 params ~ 2.4 KB/file, ~312 KB for
+//   all 128 slots on a 9 MB FAT partition) — negligible.
+//   Downgrade note: firmware older than this refuses a v3 file with a
+//   "format v3/... refused" log line.  The file is not damaged; it loads
+//   again once current firmware is back.
+//
+//   v2 files (below) are still READ, never written.  A v2 patch becomes v3
+//   the next time it is saved.
+//
+// TABLE GROWTH FOR v2 FILES (ledger D-10, 2026-10-17; widened 2026-10-22)
+//   v2 stored values by ORDINAL only, so older v2 tables need a frozen list.
+//   Readable: the current count (direct) and a 250-, 252-, 303- or 304-parameter file
+//   is loaded BY ParamID through the frozen lists in PatchLegacyIds.h (252 via
+//   PatchLegacy252.h).  Parameters the old table did not have keep their
+//   defaults.  The file is only rewritten (in the current format) when it is
+//   saved again.  Files from any other count are still refused.
+//   These lists are now FROZEN FOR GOOD: v3 files never need a new one.
 //
 // WHY NORMALISED FLOATS AND NOT ENGINEERING UNITS
 //   Because the curve lives in params.yaml. Storing Hz would freeze today's
@@ -27,7 +47,7 @@
 //   later.
 //
 // FILES
-//   /patches/NNN.bin   header + kParamCount floats
+//   /patches/NNN.bin   header + recordCount Records (v3); v2: header + floats
 //   /patches/index.txt one name per line, up to MAX_PATCHES
 //   /patches/perf.txt  the single performance name
 // =============================================================================
@@ -41,16 +61,32 @@
 
 class PatchStore {
 public:
-    // Bumped from v1. A v1 file has no magic at all, so it fails the header
-    // check and is refused — it cannot be misread as a short v2 file.
-    static constexpr uint32_t kMagic   = 0x4A543830;   // "JT80"
-    static constexpr uint16_t kVersion = 2;
+    // A v1 file has no magic at all, so it fails the header check and is
+    // refused — it cannot be misread as a short v2/v3 file.
+    static constexpr uint32_t kMagic     = 0x4A543830;   // "JT80"
+    static constexpr uint16_t kVersion   = 3;            // written by save()
+    static constexpr uint16_t kVersionV2 = 2;            // read-only (older files)
+
+    // Corruption guard for v3: a header claiming more records than this is
+    // refused before any read.  ParamIDs are 14-bit (NRPN), so no real table
+    // can exceed 16384; 4096 is ~13x today's table and caps a bad file's read
+    // at 32 KB.
+    static constexpr uint16_t kMaxRecords = 4096;
 
     struct Header {
         uint32_t magic;
         uint16_t version;
-        uint16_t paramCount;   // must equal JT::Params::kParamCount
+        uint16_t paramCount;   // v3: number of Records; v2: number of floats
     };
+    static_assert(sizeof(Header) == 8, "on-flash header layout is 8 bytes");
+
+    // v3 body element.  Natural alignment, no packing pragma needed: 2+2+4.
+    struct Record {
+        uint16_t id;           // ParamID (params.yaml), NOT an ordinal
+        uint16_t reserved;     // written 0; ignored on read (room for flags)
+        float    norm;         // normalised 0..1, clamped by loadAll() later
+    };
+    static_assert(sizeof(Record) == 8, "on-flash record layout is 8 bytes");
 
     PatchStore() = default;
 
@@ -61,9 +97,11 @@ public:
     bool save(uint8_t slot, const float* values, size_t count,
               const char* name = nullptr);
 
-    // Load into `values`. Returns false — and leaves `values` UNTOUCHED — if
-    // the file is missing, has a bad header, or was written against a different
-    // param count.
+    // Load into `values` (kParamCount floats, table order).  Returns false if
+    // the file is missing, has a bad header, is a v2 file of an unknown count,
+    // or is truncated.  `values` is untouched on a header failure; on a short
+    // read it may be partly written, so callers must only apply it on true
+    // (PatchManager loads into a scratch buffer and does exactly that).
     bool load(uint8_t slot, float* values, size_t count);
 
     bool        exists(uint8_t slot) const;
@@ -78,9 +116,17 @@ public:
     bool        setPerfName(const char* name);
 
 private:
-    // D-10: read a 252-parameter file body (header already consumed) into the
-    // current table by ParamID.  See PatchLegacy252.h.
-    bool loadLegacy252(fs::File& f, float* values, size_t count);
+    // D-10: read an older file body (header already consumed) into the
+    // current table by ParamID.  `oldIds[i]` is the ParamID at old ordinal i,
+    // `oldCount` entries long.  See PatchLegacyIds.h.
+    bool loadLegacy(fs::File& f, const uint16_t* oldIds, size_t oldCount,
+                    float* values, size_t count);
+
+    // v3: read `recordCount` Records (header already consumed) into the
+    // current table by ParamID.  Reports how many records matched a current
+    // param and how many were skipped as unknown, for the load log.
+    bool loadV3(fs::File& f, uint16_t recordCount, float* values, size_t count,
+                size_t& matched, size_t& unknown);
 
     bool mounted_ = false;
     char names_[Config::MAX_PATCHES][17] = {};
